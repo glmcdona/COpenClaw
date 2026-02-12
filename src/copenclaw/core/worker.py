@@ -430,7 +430,7 @@ class WorkerThread:
         self.on_output = on_output      # callback(task_id, output_text)
         self.on_complete = on_complete   # callback(task_id, final_output)
         self.timeout = timeout
-        self.root_workspace_dir = root_workspace_dir  # Main workspace (e.g. ~/.githubclaw)
+        self.root_workspace_dir = root_workspace_dir  # Main workspace (e.g. ~/.copenclaw)
         self.resume_session_id = resume_session_id  # Resume previous worker session
 
         self._thread: Optional[threading.Thread] = None
@@ -745,7 +745,7 @@ class SupervisorThread:
         self.timeout = timeout
         self.supervisor_instructions = supervisor_instructions
         self.working_dir = working_dir   # The task directory (parent)
-        self.root_workspace_dir = root_workspace_dir  # Main workspace (e.g. ~/.githubclaw)
+        self.root_workspace_dir = root_workspace_dir  # Main workspace (e.g. ~/.copenclaw)
         self._task_manager = task_manager  # For contextual trigger prompts
         self._worker_pool = worker_pool    # For checking worker state
 

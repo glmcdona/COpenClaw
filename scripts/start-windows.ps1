@@ -14,7 +14,7 @@ $ProjectDir = Split-Path -Parent $ScriptDir
 Push-Location $ProjectDir
 try {
   if (-not $env:copenclaw_WORKSPACE_DIR -or [string]::IsNullOrWhiteSpace($env:copenclaw_WORKSPACE_DIR)) {
-    $defaultWorkspace = Join-Path $env:USERPROFILE ".githubclaw"
+    $defaultWorkspace = Join-Path $env:USERPROFILE ".copenclaw"
     $env:copenclaw_WORKSPACE_DIR = $defaultWorkspace
   }
 

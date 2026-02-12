@@ -42,7 +42,7 @@ class Settings:
 
     @staticmethod
     def from_env() -> "Settings":
-        default_workspace = str(Path(os.path.expanduser("~")) / ".githubclaw")
+        default_workspace = str(Path(os.path.expanduser("~")) / ".copenclaw")
         default_log_dir = str(Path(default_workspace) / ".logs")
         default_data_dir = str(Path(default_workspace) / ".data")
         telegram_allow = os.getenv("TELEGRAM_ALLOW_FROM", "")

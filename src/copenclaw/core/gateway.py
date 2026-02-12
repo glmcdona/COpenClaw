@@ -187,8 +187,8 @@ def _resolve_repo_root() -> str:
 
 
 def _ensure_code_link(workspace_dir: str) -> None:
-    """Create or update a .yourcode link in the workspace pointing to the app code."""
-    link_path = os.path.join(workspace_dir, ".yourcode")
+    """Create or update a OwnCode link in the workspace pointing to the app code."""
+    link_path = os.path.join(workspace_dir, "OwnCode")
     repo_root = _resolve_repo_root()
     if not repo_root or not os.path.isdir(repo_root):
         logger.warning("Code link skipped; repo root not found at %s", repo_root)
