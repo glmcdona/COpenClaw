@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "copenclaw"
+version = "0.1.0"
+description = "Local-first Copilot CLI powered assistant with chat channels and MCP tools."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Copenclaw" }]
+dependencies = [
+  "fastapi>=0.110.0",
+  "uvicorn>=0.27.0",
+  "pydantic>=2.6.0",
+  "python-dotenv>=1.0.1",
+  "httpx>=0.26.0",
+  "PyJWT>=2.8.0",
+  "typer>=0.12.0",
+  "croniter>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.4.0",
+  "pytest-asyncio>=0.23.0",
+]
+
+[project.scripts]
+copenclaw = "copenclaw.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/copenclaw"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

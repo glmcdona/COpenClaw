@@ -1,0 +1,21 @@
+# ── Secrets ───────────────────────────────────────────
+.env
+
+# ── Python ────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+
+# ── Reference / vendored upstream ─────────────────────
+.reference-openclaw-main/
+.reference-github-copilot-cli/
+
+# ── IDE / OS ──────────────────────────────────────────
+.vscode/
+*.swp
+Thumbs.db
+.DS_Store
