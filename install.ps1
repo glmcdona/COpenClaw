@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     copenclaw installer for Windows.
@@ -15,7 +15,7 @@ param(
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"   # speed up Invoke-WebRequest if used
 
-# ── Colours ───────────────────────────────────────────────────────────────
+# -- Colours ---------------------------------------------------------------
 
 function Write-Step  { param([string]$n,[string]$t) Write-Host "`n[$n] $t" -ForegroundColor Cyan }
 function Write-Ok    { param([string]$t) Write-Host "  [OK] $t" -ForegroundColor Green }
@@ -23,7 +23,7 @@ function Write-Warn  { param([string]$t) Write-Host "  [!!] $t" -ForegroundColor
 function Write-Err   { param([string]$t) Write-Host "  [ERR] $t" -ForegroundColor Red }
 function Write-Info  { param([string]$t) Write-Host "  $t" }
 
-# ── Resolve project root ─────────────────────────────────────────────────
+# -- Resolve project root -------------------------------------------------
 
 $ScriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
 # If installed at repo root
@@ -43,7 +43,7 @@ Push-Location $ProjectDir
 
 try {
 
-# ── Banner ────────────────────────────────────────────────────────────────
+# -- Banner ----------------------------------------------------------------
 
 Write-Host ""
 Write-Host "==================================================" -ForegroundColor Cyan
@@ -51,7 +51,7 @@ Write-Host "  copenclaw  Installer  (Windows)" -ForegroundColor Cyan
 Write-Host "==================================================" -ForegroundColor Cyan
 Write-Host ""
 
-# ── Security Disclaimer ──────────────────────────────────────────────────
+# -- Security Disclaimer --------------------------------------------------
 
 $disclaimer = @"
 
@@ -99,7 +99,7 @@ if ($agree -ne "I AGREE") {
 Write-Ok "Risks acknowledged."
 Write-Host ""
 
-# ── Detect existing install ───────────────────────────────────────────────
+# -- Detect existing install -----------------------------------------------
 
 $HasVenv = Test-Path ".venv"
 $HasEnv  = Test-Path ".env"
@@ -144,7 +144,7 @@ if ($HasVenv -or $HasEnv) {
     }
 }
 
-# ── Step 1: Prerequisites ────────────────────────────────────────────────
+# -- Step 1: Prerequisites ------------------------------------------------
 
 Write-Step "1/6" "Checking prerequisites..."
 
@@ -177,7 +177,7 @@ Write-Ok "pip available"
 $git = Get-Command git -ErrorAction SilentlyContinue
 if ($git) { Write-Ok "git available" } else { Write-Warn "git not found (optional)" }
 
-# ── Step 2: GitHub Copilot CLI ────────────────────────────────────────────
+# -- Step 2: GitHub Copilot CLI --------------------------------------------
 
 Write-Step "2/6" "Checking GitHub Copilot CLI..."
 
@@ -224,7 +224,7 @@ if (-not $copilotCmd) {
     Write-Ok "GitHub Copilot CLI found"
 }
 
-# ── Copilot CLI auth check ────────────────────────────────────────────────
+# -- Copilot CLI auth check ------------------------------------------------
 
 Write-Step "2b/6" "Verifying GitHub authentication..."
 
@@ -286,11 +286,11 @@ if ($ghToken) {
             }
         }
     } else {
-        Write-Warn "Copilot CLI not available — skipping auth check."
+        Write-Warn "Copilot CLI not available -- skipping auth check."
     }
 }
 
-# ── Step 3: Virtual environment & install ─────────────────────────────────
+# -- Step 3: Virtual environment & install ---------------------------------
 
 Write-Step "3/6" "Setting up virtual environment..."
 
@@ -307,7 +307,10 @@ Write-Info "Activating .venv..."
 . .\.venv\Scripts\Activate.ps1
 
 Write-Info "Installing copenclaw and dependencies..."
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 & pip install -e . 2>&1 | Out-Null
+$ErrorActionPreference = $prevEAP
 if ($LASTEXITCODE -ne 0) {
     Write-Err "pip install failed.  Check output above."
     & pip install -e .
@@ -315,7 +318,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Ok "copenclaw installed in .venv"
 
-# ── Step 4: Interactive configuration ─────────────────────────────────────
+# -- Step 4: Interactive configuration -------------------------------------
 
 Write-Step "4/6" "Running interactive configuration..."
 Write-Host ""
@@ -329,7 +332,7 @@ if ($LASTEXITCODE -ne 0) {
 # Record disclaimer acceptance so the app doesn't re-prompt
 & python -c "from copenclaw.core.disclaimer import record_acceptance; record_acceptance()"
 
-# ── Step 5: Autostart ─────────────────────────────────────────────────────
+# -- Step 5: Autostart -----------------------------------------------------
 
 Write-Step "5/6" "Autostart configuration..."
 
@@ -337,8 +340,8 @@ if ($SkipAutostart) {
     Write-Info "Skipped (--SkipAutostart flag)."
 } else {
     Write-Host ""
-    $wantAutostart = Read-Host "  Set copenclaw to start automatically on login? (y/N)"
-    if ($wantAutostart -match "^[Yy]") {
+    $wantAutostart = Read-Host "  Set copenclaw to start automatically on login? (Y/n)"
+    if ($wantAutostart -eq "" -or $wantAutostart -match "^[Yy]") {
         $venvPython = Join-Path $ProjectDir ".venv\Scripts\python.exe"
         $taskName = "copenclaw"
 
@@ -379,7 +382,7 @@ if ($SkipAutostart) {
     }
 }
 
-# ── Step 6: Verification ─────────────────────────────────────────────────
+# -- Step 6: Verification -------------------------------------------------
 
 Write-Step "6/6" "Verifying installation..."
 
@@ -411,13 +414,13 @@ try {
 }
 
 if ($healthPassed) {
-    Write-Ok "Health check passed — copenclaw is working!"
+    Write-Ok "Health check passed -- copenclaw is working!"
 } else {
     Write-Warn "Health check inconclusive.  This is normal if Copilot CLI is not yet authenticated."
     Write-Info "Start manually to verify: copenclaw serve"
 }
 
-# ── Summary ───────────────────────────────────────────────────────────────
+# -- Summary ---------------------------------------------------------------
 
 Write-Host ""
 Write-Host "==================================================" -ForegroundColor Green

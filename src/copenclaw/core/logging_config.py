@@ -6,7 +6,7 @@ loggers for MCP calls, commands, and activity streams.
 
 Log directory structure::
 
-    ~/.githubclaw/.logs/
+    ~/.copenclaw/.logs/
     ├── copenclaw.log          # All Python logger output (rotating)
     ├── mcp-calls.log             # Every MCP JSON-RPC request/response (JSONL)
     ├── commands.log              # All user commands (chat, slash, exec)
@@ -44,7 +44,7 @@ def get_log_dir() -> str:
     """Return the configured log directory, falling back to default."""
     if _log_dir:
         return _log_dir
-    default = str(Path(os.path.expanduser("~")) / ".githubclaw" / ".logs")
+    default = str(Path(os.path.expanduser("~")) / ".copenclaw" / ".logs")
     return os.getenv("copenclaw_LOG_DIR", default)
 
 
