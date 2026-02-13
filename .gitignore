@@ -10,6 +10,9 @@ dist/
 build/
 .venv/
 
+# 
+.data
+
 # ── Reference / vendored upstream ─────────────────────
 .reference-openclaw-main/
 .reference-github-copilot-cli/

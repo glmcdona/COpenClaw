@@ -5,11 +5,11 @@ build-backend = "hatchling.build"
 [project]
 name = "copenclaw"
 version = "0.1.0"
-description = "Local-first Copilot CLI powered assistant with chat channels and MCP tools."
+description = "COpenClaw — Local-first Copilot CLI powered assistant with chat channels and MCP tools."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "Copenclaw" }]
+authors = [{ name = "COpenClaw" }]
 dependencies = [
   "fastapi>=0.110.0",
   "uvicorn>=0.27.0",

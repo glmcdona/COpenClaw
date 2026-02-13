@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""copenclaw interactive configurator.
+"""COpenClaw interactive configurator.
 
 Pure-stdlib script (no third-party deps) that handles:
   1. Workspace directory setup + multi-folder linking
@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -146,7 +147,7 @@ def configure_workspace(env_values: Dict[str, str]) -> Dict[str, str]:
     banner("Workspace Configuration")
 
     ws = _default_workspace()
-    print(f"copenclaw workspace: {cyan(str(ws))}\n")
+    print(f"COpenClaw workspace: {cyan(str(ws))}\n")
     ws.mkdir(parents=True, exist_ok=True)
     env_values["COPILOT_CLAW_WORKSPACE_DIR"] = str(ws)
 
@@ -405,6 +406,190 @@ def select_channels() -> List[Channel]:
     return selected
 
 
+def _try_interactive_pairing_telegram(token: str) -> Optional[Dict[str, str]]:
+    """Poll for the first Telegram message and return user info if confirmed.
+
+    Returns a dict with 'user_id', 'chat_id', 'first_name' on success, else None.
+    """
+    if not token:
+        return None
+
+    print(f"\n  {cyan('Interactive pairing:')}")
+    print("  Now send any message to your bot on Telegram (e.g. 'hello').")
+    print(f"  {dim('Waiting up to 120 seconds for a message...')}\n")
+
+    try:
+        import json as _json
+        from urllib.request import urlopen, Request as UrlRequest
+        from urllib.error import URLError
+    except ImportError:
+        print(f"  {red('✗')} urllib not available — skipping interactive pairing.")
+        return None
+
+    base_url = f"https://api.telegram.org/bot{token}"
+
+    # Delete any existing webhook so we can poll
+    try:
+        req = UrlRequest(
+            f"{base_url}/deleteWebhook",
+            data=_json.dumps({"drop_pending_updates": True}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urlopen(req, timeout=10)
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Poll for updates
+    offset = 0
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        try:
+            params = f"?timeout=5&allowed_updates=%5B%22message%22%5D"
+            if offset:
+                params += f"&offset={offset}"
+            req = UrlRequest(f"{base_url}/getUpdates{params}", method="GET")
+            resp = urlopen(req, timeout=15)
+            data = _json.loads(resp.read().decode())
+            if not data.get("ok"):
+                time.sleep(2)
+                continue
+            results = data.get("result", [])
+            for update in results:
+                update_id = update.get("update_id", 0)
+                offset = update_id + 1
+                message = update.get("message")
+                if not message:
+                    continue
+                sender = message.get("from", {})
+                user_id = sender.get("id")
+                first_name = sender.get("first_name", "Unknown")
+                username = sender.get("username", "")
+                chat_id = message.get("chat", {}).get("id")
+                text = message.get("text", "")
+                if not user_id or not chat_id:
+                    continue
+
+                # Found a message — ask for confirmation
+                user_desc = f"{first_name}"
+                if username:
+                    user_desc += f" (@{username})"
+                print(f"  {green('✔')} Received message from {bold(user_desc)} (ID: {cyan(str(user_id))})")
+                if text:
+                    print(f"    Message: \"{text[:80]}\"")
+                print()
+
+                if prompt_yn(f"  Authorize this user as the owner?", default=True):
+                    # Send confirmation to the Telegram chat
+                    try:
+                        reply_text = "✅ You're now paired as the owner of this COpenClaw instance!"
+                        reply_data = _json.dumps({"chat_id": chat_id, "text": reply_text}).encode()
+                        reply_req = UrlRequest(
+                            f"{base_url}/sendMessage",
+                            data=reply_data,
+                            headers={"Content-Type": "application/json"},
+                            method="POST",
+                        )
+                        urlopen(reply_req, timeout=10)
+                        print(f"  {green('✔')} Confirmation sent to Telegram chat\n")
+                    except Exception:  # noqa: BLE001
+                        print(f"  {yellow('!')} Could not send confirmation reply (non-critical)\n")
+
+                    return {
+                        "user_id": str(user_id),
+                        "chat_id": str(chat_id),
+                        "first_name": first_name,
+                    }
+                else:
+                    print(f"  {yellow('!')} Skipped. You can set TELEGRAM_ALLOW_FROM manually later.\n")
+                    return None
+        except Exception as exc:  # noqa: BLE001
+            remaining = int(deadline - time.time())
+            if remaining > 0:
+                print(f"  {dim(f'  (polling... {remaining}s remaining)')}", end="\r")
+                time.sleep(2)
+            continue
+
+    print(f"  {yellow('!')} No message received. You can set TELEGRAM_ALLOW_FROM manually later.\n")
+    return None
+
+
+def _try_interactive_pairing_signal(api_url: str, phone_number: str) -> Optional[Dict[str, str]]:
+    """Poll signal-cli-rest-api for the first message and return sender info."""
+    if not api_url or not phone_number:
+        return None
+
+    print(f"\n  {cyan('Interactive pairing:')}")
+    print("  Now send a message to your Signal number.")
+    print(f"  {dim('Waiting up to 120 seconds for a message...')}\n")
+
+    try:
+        import json as _json
+        from urllib.request import urlopen, Request as UrlRequest
+    except ImportError:
+        print(f"  {red('✗')} urllib not available — skipping interactive pairing.")
+        return None
+
+    from urllib.parse import quote
+    encoded_number = quote(phone_number, safe="")
+    deadline = time.time() + 120
+
+    while time.time() < deadline:
+        try:
+            url = f"{api_url.rstrip('/')}/v1/receive/{encoded_number}"
+            req = UrlRequest(url, method="GET")
+            resp = urlopen(req, timeout=10)
+            data = _json.loads(resp.read().decode())
+            if not isinstance(data, list):
+                time.sleep(2)
+                continue
+            for msg in data:
+                envelope = msg.get("envelope", {})
+                source = envelope.get("source") or envelope.get("sourceNumber")
+                data_msg = envelope.get("dataMessage", {})
+                text = data_msg.get("message", "")
+                if not source:
+                    continue
+
+                print(f"  {green('✔')} Received message from {bold(source)}")
+                if text:
+                    print(f"    Message: \"{text[:80]}\"")
+                print()
+
+                if prompt_yn(f"  Authorize this user as the owner?", default=True):
+                    # Send confirmation
+                    try:
+                        reply_data = _json.dumps({
+                            "message": "✅ You're now paired as the owner of this COpenClaw instance!",
+                            "number": phone_number,
+                            "recipients": [source],
+                        }).encode()
+                        reply_req = UrlRequest(
+                            f"{api_url.rstrip('/')}/v2/send",
+                            data=reply_data,
+                            headers={"Content-Type": "application/json"},
+                            method="POST",
+                        )
+                        urlopen(reply_req, timeout=10)
+                        print(f"  {green('✔')} Confirmation sent via Signal\n")
+                    except Exception:  # noqa: BLE001
+                        print(f"  {yellow('!')} Could not send confirmation (non-critical)\n")
+
+                    return {"sender": source}
+                else:
+                    print(f"  {yellow('!')} Skipped. Set SIGNAL_ALLOW_FROM manually later.\n")
+                    return None
+        except Exception:  # noqa: BLE001
+            remaining = int(deadline - time.time())
+            if remaining > 0:
+                print(f"  {dim(f'  (polling... {remaining}s remaining)')}", end="\r")
+                time.sleep(2)
+            continue
+
+    print(f"  {yellow('!')} No message received. Set SIGNAL_ALLOW_FROM manually later.\n")
+    return None
+
+
 def configure_channels(selected: List[Channel], env_values: Dict[str, str]) -> Dict[str, str]:
     """Walk user through credential prompts for each selected channel."""
     for ch in selected:
@@ -448,6 +633,39 @@ def configure_channels(selected: List[Channel], env_values: Dict[str, str]) -> D
 
             env_values[var_name] = val
             print()
+
+        # --- Interactive pairing after credential entry ---
+
+        if ch.key == "telegram":
+            token = env_values.get("TELEGRAM_BOT_TOKEN", "")
+            existing_allow = env_values.get("TELEGRAM_ALLOW_FROM", "")
+            existing_owner = env_values.get("TELEGRAM_OWNER_CHAT_ID", "")
+            if token and not existing_allow and not existing_owner:
+                if prompt_yn("  Would you like to pair with your Telegram account now?", default=True):
+                    result = _try_interactive_pairing_telegram(token)
+                    if result:
+                        user_id = result["user_id"]
+                        chat_id = result["chat_id"]
+                        env_values["TELEGRAM_OWNER_CHAT_ID"] = chat_id
+                        env_values["TELEGRAM_ALLOW_FROM"] = user_id
+                        print(f"  {green('✔')} Set TELEGRAM_OWNER_CHAT_ID={chat_id}")
+                        print(f"  {green('✔')} Set TELEGRAM_ALLOW_FROM={user_id}\n")
+            elif token and (existing_allow or existing_owner):
+                print(f"  {dim('Owner already configured — skipping interactive pairing.')}\n")
+
+        elif ch.key == "signal":
+            api_url = env_values.get("SIGNAL_API_URL", "")
+            phone = env_values.get("SIGNAL_PHONE_NUMBER", "")
+            existing_allow = env_values.get("SIGNAL_ALLOW_FROM", "")
+            if api_url and phone and not existing_allow:
+                if prompt_yn("  Would you like to pair with your Signal account now?", default=True):
+                    result = _try_interactive_pairing_signal(api_url, phone)
+                    if result:
+                        sender = result["sender"]
+                        env_values["SIGNAL_ALLOW_FROM"] = sender
+                        print(f"  {green('✔')} Set SIGNAL_ALLOW_FROM={sender}\n")
+            elif api_url and phone and existing_allow:
+                print(f"  {dim('Owner already configured — skipping interactive pairing.')}\n")
 
     return env_values
 

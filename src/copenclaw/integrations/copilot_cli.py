@@ -110,6 +110,7 @@ class CopilotCli:
         mcp_config_path: Optional[str] = None,
         resume_session_id: Optional[str] = None,
         subcommand: Optional[str] = None,
+        yolo: bool = True,
     ) -> None:
         self.executable = executable or os.getenv("COPILOT_CLI_PATH", "copilot")
         self.workspace_dir = workspace_dir or os.getenv("copenclaw_WORKSPACE_DIR")
@@ -117,6 +118,7 @@ class CopilotCli:
         self.mcp_server_url = mcp_server_url
         self.mcp_token = mcp_token
         self.add_dirs: list[str] = add_dirs or []
+        self.yolo = yolo
 
         self._session_id: Optional[str] = None
         self._resume_session_id: Optional[str] = resume_session_id
@@ -189,19 +191,21 @@ class CopilotCli:
             cmd.extend(["--additional-mcp-config", f"@{mcp_path}"])
 
         # Grant access to additional directories so Copilot can use
-        # its built-in file tools (read/write/edit) instead of exec_run
+        # its built-in file tools (read/write/edit) instead of shell commands
         for d in self.add_dirs:
             abs_d = os.path.abspath(d)
             if os.path.isdir(abs_d):
                 cmd.extend(["--add-dir", abs_d])
 
         # Non-interactive autonomous flags
-        # --yolo enables all permissions (tools, paths, URLs) at once
-        cmd.extend([
-            "--yolo",
+        flags = [
             "--no-ask-user",
             "-s",  # silent (clean output only)
-        ])
+        ]
+        if self.yolo:
+            # --yolo enables all permissions (tools, paths, URLs) at once
+            flags.insert(0, "--yolo")
+        cmd.extend(flags)
 
         return cmd
 

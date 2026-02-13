@@ -10,8 +10,6 @@ import json
 import os
 
 from copenclaw.core.audit import log_event
-from copenclaw.core.pairing import PairingStore
-from copenclaw.core.policy import load_execution_policy, run_command
 from copenclaw.core.scheduler import Scheduler
 from copenclaw.integrations.telegram import TelegramAdapter
 from copenclaw.integrations.teams import TeamsAdapter
@@ -32,15 +30,6 @@ class JobResponse(BaseModel):
     completed_at: str | None = None
     cancelled: bool = False
     cron_expr: str | None = None
-
-class ExecRequest(BaseModel):
-    command: str
-
-class ExecResponse(BaseModel):
-    output: str
-
-class PairingApproveRequest(BaseModel):
-    code: str
 
 class ReadFileRequest(BaseModel):
     path: str
@@ -68,7 +57,6 @@ class CancelRequest(BaseModel):
 
 def get_router(
     scheduler: Scheduler,
-    pairing: PairingStore | None = None,
     data_dir: str | None = None,
     telegram_token: str | None = None,
     msteams_creds: dict | None = None,
@@ -100,14 +88,11 @@ def get_router(
                 {"name": "jobs.runs", "description": "List job run history"},
                 {"name": "jobs.cancel", "description": "Cancel a job by ID"},
                 {"name": "jobs.clear_all", "description": "Remove all scheduled jobs"},
-                {"name": "exec.run", "description": "Run a command under execution policy"},
                 {"name": "send.message", "description": "Send a message to a channel"},
                 {"name": "files.read", "description": "Read a file under data_dir"},
                 {"name": "audit.read", "description": "Read audit log events"},
-                {"name": "pairing.pending", "description": "List pending pairing codes"},
-                {"name": "pairing.approve", "description": "Approve a pairing code"},
                 {"name": "tasks.clear_all", "description": "Cancel and remove all tasks"},
-                {"name": "app.restart", "description": "Restart the copenclaw application"},
+                {"name": "app.restart", "description": "Restart the COpenClaw application"},
             ]
         }
 
@@ -163,40 +148,6 @@ def get_router(
     @router.get("/jobs/runs", response_model=RunsResponse)
     def list_runs(job_id: str | None = None, limit: int = 50) -> RunsResponse:
         return RunsResponse(runs=scheduler.list_runs(job_id=job_id, limit=limit))
-
-    @router.post("/exec/run", response_model=ExecResponse)
-    def exec_run(req: ExecRequest) -> ExecResponse:
-        policy = load_execution_policy()
-        try:
-            output = run_command(req.command, policy)
-        except PermissionError as exc:
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
-        except RuntimeError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if data_dir:
-            log_event(data_dir, "exec.run", {"command": req.command})
-        return ExecResponse(output=output)
-
-    @router.get("/pairing/pending")
-    def pairing_pending() -> dict[str, list[dict[str, str]]]:
-        if not pairing:
-            return {"pending": []}
-        pending = [
-            {"code": req.code, "channel": req.channel, "sender_id": req.sender_id}
-            for req in pairing.list_pending()
-        ]
-        return {"pending": pending}
-
-    @router.post("/pairing/approve")
-    def pairing_approve(req: PairingApproveRequest) -> dict[str, str]:
-        if not pairing:
-            raise HTTPException(status_code=400, detail="Pairing not configured")
-        result = pairing.approve(req.code)
-        if not result:
-            raise HTTPException(status_code=404, detail="Pairing code not found")
-        if data_dir:
-            log_event(data_dir, "pairing.approve", {"channel": result.channel, "sender_id": result.sender_id})
-        return {"status": "approved", "channel": result.channel, "sender_id": result.sender_id}
 
     @router.post("/files/read", response_model=ReadFileResponse)
     def files_read(req: ReadFileRequest) -> ReadFileResponse:
@@ -281,7 +232,6 @@ def get_router(
                 "jobs.runs": {"input": {"job_id": "string?", "limit": "int?"}},
                 "jobs.cancel": {"input": {"job_id": "string"}},
                 "jobs.clear_all": {"input": {}},
-                "exec.run": {"input": {"command": "string"}},
                 "send.message": {
                     "input": {
                         "channel": "string",
@@ -293,8 +243,6 @@ def get_router(
                 },
                 "files.read": {"input": {"path": "string"}},
                 "audit.read": {"input": {"limit": "int?"}},
-                "pairing.pending": {"input": {}},
-                "pairing.approve": {"input": {"code": "string"}},
                 "tasks.clear_all": {"input": {}},
                 "app.restart": {"input": {"reason": "string?"}},
             }
@@ -321,12 +269,9 @@ def get_router(
                         "jobs.runs",
                         "jobs.cancel",
                         "jobs.clear_all",
-                        "exec.run",
                         "send.message",
                         "files.read",
                         "audit.read",
-                        "pairing.pending",
-                        "pairing.approve",
                         "tasks.clear_all",
                         "app.restart",
                     ],

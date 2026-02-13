@@ -15,7 +15,7 @@ class TestTaskEvent:
         event = TaskEvent(
             timestamp="2026-01-01T00:00:00",
             role="worker",
-            tool="exec_run",
+            tool="files_read",
             args_summary="ls -la",
             result_summary="file1.txt file2.txt",
             is_error=False,
@@ -23,30 +23,30 @@ class TestTaskEvent:
         )
         d = event.to_dict()
         assert d["role"] == "worker"
-        assert d["tool"] == "exec_run"
+        assert d["tool"] == "files_read"
         restored = TaskEvent.from_dict(d)
         assert restored.role == "worker"
-        assert restored.tool == "exec_run"
+        assert restored.tool == "files_read"
         assert restored.task_id == "task-123"
 
     def test_format_line_success(self):
         event = TaskEvent(
             timestamp="2026-01-01T12:00:00",
             role="worker",
-            tool="exec_run",
+            tool="files_read",
             args_summary="node -v",
             result_summary="v20.0.0",
         )
         line = event.format_line()
         assert "✓" in line
-        assert "exec_run" in line
+        assert "files_read" in line
         assert "node -v" in line
 
     def test_format_line_error(self):
         event = TaskEvent(
             timestamp="2026-01-01T12:00:00",
             role="worker",
-            tool="exec_run",
+            tool="files_read",
             args_summary="bad_cmd",
             result_summary="command not found",
             is_error=True,
@@ -58,13 +58,13 @@ class TestTaskEvent:
 class TestTaskEventLog:
     def test_append_and_tail(self, tmp_path):
         log = TaskEventLog(str(tmp_path), task_id="task-abc")
-        log.append("worker", "exec_run", "ls", "file1 file2")
+        log.append("worker", "files_read", "README.md", "file contents")
         log.append("worker", "task_report", "progress", "50% done")
         log.append("supervisor", "task_read_peer", "task-abc", "worker active")
 
         events = log.tail(10)
         assert len(events) == 3
-        assert events[0].tool == "exec_run"
+        assert events[0].tool == "files_read"
         assert events[1].tool == "task_report"
         assert events[2].role == "supervisor"
 
@@ -81,9 +81,9 @@ class TestTaskEventLog:
     def test_count(self, tmp_path):
         log = TaskEventLog(str(tmp_path), task_id="task-abc")
         assert log.count() == 0
-        log.append("worker", "exec_run", "ls", "ok")
+        log.append("worker", "files_read", "README.md", "ok")
         assert log.count() == 1
-        log.append("worker", "exec_run", "pwd", "/home")
+        log.append("worker", "files_read", "README.md", "/home")
         assert log.count() == 2
 
     def test_empty_tail(self, tmp_path):
@@ -96,14 +96,14 @@ class TestTaskEventLog:
 
     def test_formatted_tail_with_events(self, tmp_path):
         log = TaskEventLog(str(tmp_path), task_id="task-abc")
-        log.append("worker", "exec_run", "node -v", "v20.0.0")
+        log.append("worker", "files_read", "README.md", "v20.0.0")
         text = log.formatted_tail()
-        assert "exec_run" in text
-        assert "node -v" in text
+        assert "files_read" in text
+        assert "README.md" in text
 
     def test_error_event(self, tmp_path):
         log = TaskEventLog(str(tmp_path), task_id="task-abc")
-        event = log.append("worker", "exec_run", "bad_cmd", "not found", is_error=True)
+        event = log.append("worker", "files_read", "missing.txt", "not found", is_error=True)
         assert event.is_error is True
         events = log.tail()
         assert events[0].is_error is True
@@ -111,16 +111,16 @@ class TestTaskEventLog:
     def test_truncates_long_args(self, tmp_path):
         log = TaskEventLog(str(tmp_path), task_id="task-abc")
         long_arg = "x" * 1000
-        event = log.append("worker", "exec_run", long_arg, "ok")
+        event = log.append("worker", "files_read", long_arg, "ok")
         assert len(event.args_summary) == 500
 
     def test_jsonl_format(self, tmp_path):
         log = TaskEventLog(str(tmp_path), task_id="task-abc")
-        log.append("worker", "exec_run", "ls", "ok")
+        log.append("worker", "files_read", "README.md", "ok")
         with open(log.path, "r") as f:
             line = f.readline()
         data = json.loads(line)
-        assert data["tool"] == "exec_run"
+        assert data["tool"] == "files_read"
         assert data["role"] == "worker"
 
 

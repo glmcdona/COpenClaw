@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import glob
 import logging
 from typing import Optional
@@ -41,7 +41,59 @@ from copenclaw.mcp.protocol import MCPProtocolHandler
 logger = logging.getLogger("copenclaw.gateway")
 
 import platform
+import re
 import socket
+
+
+def _get_git_branch_info(repo_root: str) -> dict:
+    """Get current branch name and .py diff stats vs main.
+
+    Returns dict with keys: branch, py_lines_changed, diff_summary, main_ref.
+    Returns empty dict on any failure.
+    """
+    try:
+        branch = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=repo_root, capture_output=True, text=True, timeout=10,
+        )
+        if branch.returncode != 0:
+            return {}
+        branch_name = branch.stdout.strip()
+
+        # Check if 'main' branch exists (could be 'master' etc.)
+        main_ref = None
+        for candidate in ("main", "master", "origin/main", "origin/master"):
+            check = subprocess.run(
+                ["git", "rev-parse", "--verify", candidate],
+                cwd=repo_root, capture_output=True, text=True, timeout=10,
+            )
+            if check.returncode == 0:
+                main_ref = candidate
+                break
+
+        py_lines = 0
+        diff_summary = ""
+        if main_ref and branch_name not in ("main", "master"):
+            diff = subprocess.run(
+                ["git", "diff", main_ref, "--stat", "--", "*.py"],
+                cwd=repo_root, capture_output=True, text=True, timeout=10,
+            )
+            if diff.returncode == 0 and diff.stdout.strip():
+                diff_summary = diff.stdout.strip()
+                last_line = diff_summary.split("\n")[-1]
+                for m in re.finditer(r"(\d+)\s+insertion", last_line):
+                    py_lines += int(m.group(1))
+                for m in re.finditer(r"(\d+)\s+deletion", last_line):
+                    py_lines += int(m.group(1))
+
+        return {
+            "branch": branch_name,
+            "py_lines_changed": py_lines,
+            "diff_summary": diff_summary,
+            "main_ref": main_ref or "",
+        }
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 def _build_boot_message(
@@ -52,7 +104,7 @@ def _build_boot_message(
     scheduler: Scheduler,
 ) -> str:
     """Build an informative boot notification message."""
-    lines = ["🦀 **copenclaw** is online and awaiting commands!"]
+    lines = ["🦀 **COpenClaw** is online and awaiting commands!"]
 
     # Brain session
     if cli.session_id:
@@ -133,11 +185,23 @@ def _build_boot_message(
     timeout_min = settings.copilot_cli_timeout // 60
     lines.append(f"⏱️ CLI timeout: {timeout_min}min")
 
+    # Git branch info
+    repo_root = _resolve_repo_root()
+    if repo_root and os.path.isdir(repo_root):
+        git_info = _get_git_branch_info(repo_root)
+        if git_info.get("branch"):
+            branch_line = f"🌿 Branch: **{git_info['branch']}**"
+            py_lines = git_info.get("py_lines_changed", 0)
+            main_ref = git_info.get("main_ref", "")
+            if main_ref and git_info["branch"] not in ("main", "master") and py_lines > 0:
+                branch_line += f" ({py_lines} lines changed in .py files vs {main_ref})"
+            lines.append(branch_line)
+
     return "\n".join(lines)
 
 
 _README_TEMPLATE = """\
-# copenclaw Workspace
+# COpenClaw Workspace
 
 This file is a persistent project log. Workers update it after completing
 tasks so the orchestrator and future workers know what has been done.
@@ -275,7 +339,7 @@ def _build_stale_tasks_message(stale_tasks: list) -> str:
         "pending": "⏳",
     }
     lines = ["⚠️ **Stale tasks detected**\n"]
-    lines.append("These tasks were in-progress when copenclaw last shut down:\n")
+    lines.append("These tasks were in-progress when COpenClaw last shut down:\n")
     for t in stale_tasks:
         emoji = status_emoji.get(t.status, "•")
         lines.append(f"{emoji} **{t.name}** (`{t.task_id}`) — was {t.status}")
@@ -396,7 +460,7 @@ def create_app() -> FastAPI:
         run_log_path=f"{settings.data_dir}/job-runs.jsonl",
     )
     sessions = SessionStore(store_path=f"{settings.data_dir}/sessions.json")
-    pairing = PairingStore(store_path=f"{settings.data_dir}/pairing.json", code_length=settings.pairing_code_length)
+    pairing = PairingStore(store_path=f"{settings.data_dir}/pairing.json")
     rate_limiter = RateLimiter(
         max_calls=settings.webhook_rate_limit_calls,
         window_seconds=settings.webhook_rate_limit_seconds,
@@ -602,13 +666,46 @@ def create_app() -> FastAPI:
             logger.warning("Brain session creation failed (will use per-call mode): %s", exc)
             log_event(settings.data_dir, "brain.boot.failed", {"error": str(exc)})
 
+        # Check for updates
+        update_notice = ""
+        try:
+            from copenclaw.core.updater import check_for_updates, format_update_check
+            repo_root_for_update = _resolve_repo_root()
+            update_info = check_for_updates(repo_root_for_update)
+            if update_info:
+                update_notice = "\n\n" + format_update_check(update_info)
+                logger.info("Update available: %d commits behind", update_info.commits_behind)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Update check during boot failed: %s", exc)
+
         # Send boot notification via Telegram
         owner_chat_id = settings.telegram_owner_chat_id
         if settings.telegram_bot_token and owner_chat_id:
             try:
                 msg = _build_boot_message(settings, cli, mcp_server_url, task_manager, scheduler)
+                if update_notice:
+                    msg += update_notice
                 _telegram_adapter().send_message(chat_id=int(owner_chat_id), text=msg)
                 logger.info("Boot notification sent to Telegram chat %s", owner_chat_id)
+
+                # Send PR encouragement if .py diff vs main is > 5 lines
+                try:
+                    rr = _resolve_repo_root()
+                    if rr and os.path.isdir(rr):
+                        git_info = _get_git_branch_info(rr)
+                        py_lines = git_info.get("py_lines_changed", 0)
+                        branch = git_info.get("branch", "")
+                        if py_lines > 5 and branch not in ("main", "master", ""):
+                            pr_msg = (
+                                f"💡 You have {py_lines} lines of Python changes vs main "
+                                f"on branch '{branch}'.\n"
+                                "Ask me to create a PR with your improvements to the COpenClaw project!"
+                            )
+                            _telegram_adapter().send_message(chat_id=int(owner_chat_id), text=pr_msg)
+                            logger.info("PR encouragement sent (%d .py lines changed)", py_lines)
+                except Exception as exc2:  # noqa: BLE001
+                    logger.debug("PR encouragement check failed: %s", exc2)
+
             except Exception as exc:  # noqa: BLE001
                 logger.error("Failed to send boot notification: %s", exc)
 
@@ -724,6 +821,7 @@ def create_app() -> FastAPI:
                 allow_from=settings.telegram_allow_from,
                 pairing_mode=settings.pairing_mode,
                 data_dir=settings.data_dir,
+                owner_id=settings.telegram_owner_chat_id,
                 task_manager=task_manager,
                 scheduler=scheduler,
                 worker_pool=worker_pool,
@@ -746,6 +844,10 @@ def create_app() -> FastAPI:
         # Start scheduler thread
         sched_thread = threading.Thread(target=_scheduler_loop, daemon=True)
         sched_thread.start()
+
+        # Start watchdog thread for stuck tasks
+        watchdog_thread = threading.Thread(target=_watchdog_loop, daemon=True, name="task-watchdog")
+        watchdog_thread.start()
 
         # Start Telegram polling if configured
         if settings.telegram_bot_token:
@@ -773,7 +875,7 @@ def create_app() -> FastAPI:
         if signal_adapter:
             signal_adapter.stop_polling()
 
-    app = FastAPI(title="copenclaw", version="0.2.0", lifespan=lifespan)
+    app = FastAPI(title="COpenClaw", version="0.2.0", lifespan=lifespan)
 
     # ---- models ----
 
@@ -909,11 +1011,14 @@ def create_app() -> FastAPI:
                 allow_from=settings.telegram_allow_from,
                 pairing_mode=settings.pairing_mode,
                 data_dir=settings.data_dir,
+                owner_id=settings.telegram_owner_chat_id,
                 task_manager=task_manager,
                 scheduler=scheduler,
                 worker_pool=worker_pool,
                 on_task_approved=_on_task_approved,
                 on_task_cancelled=_on_task_cancelled,
+                on_task_retry_approved=_on_task_retry_approved,
+                on_task_retry_rejected=_on_task_retry_rejected,
                 on_restart=_restart_app,
             )
         finally:
@@ -978,6 +1083,7 @@ def create_app() -> FastAPI:
             allow_from=settings.msteams_allow_from,
             pairing_mode=settings.pairing_mode,
             data_dir=settings.data_dir,
+            owner_id=None,
             task_manager=task_manager,
             scheduler=scheduler,
             worker_pool=worker_pool,
@@ -1068,6 +1174,7 @@ def create_app() -> FastAPI:
                 allow_from=settings.whatsapp_allow_from,
                 pairing_mode=settings.pairing_mode,
                 data_dir=settings.data_dir,
+                owner_id=None,
                 task_manager=task_manager,
                 scheduler=scheduler,
                 worker_pool=worker_pool,
@@ -1125,6 +1232,7 @@ def create_app() -> FastAPI:
             allow_from=settings.signal_allow_from,
             pairing_mode=settings.pairing_mode,
             data_dir=settings.data_dir,
+            owner_id=None,
             task_manager=task_manager,
             scheduler=scheduler,
             worker_pool=worker_pool,
@@ -1204,6 +1312,7 @@ def create_app() -> FastAPI:
             allow_from=settings.slack_allow_from,
             pairing_mode=settings.pairing_mode,
             data_dir=settings.data_dir,
+            owner_id=None,
             task_manager=task_manager,
             scheduler=scheduler,
             worker_pool=worker_pool,
@@ -1233,7 +1342,6 @@ def create_app() -> FastAPI:
 
     mcp_handler = MCPProtocolHandler(
         scheduler=scheduler,
-        pairing=pairing,
         data_dir=settings.data_dir,
         telegram_token=settings.telegram_bot_token,
         msteams_creds=msteams_creds,
@@ -1243,8 +1351,8 @@ def create_app() -> FastAPI:
         execution_policy=execution_policy,
     )
 
-    # Wire on_complete hook: when a task completes with an on_complete prompt,
-    # feed it to the orchestrator CLI session so it can spawn follow-up tasks.
+    # Wire completion hook: when a task completes, feed a completion prompt
+    # (including any on_complete instruction) to the orchestrator CLI session.
     def _on_complete_hook(prompt: str, channel: str, target: str, service_url: str, source_task_name: str) -> None:
         try:
             logger.info("on_complete hook firing for task '%s'", source_task_name)
@@ -1268,6 +1376,132 @@ def create_app() -> FastAPI:
             logger.error("on_complete hook failed for task '%s': %s", source_task_name, exc)
 
     mcp_handler.on_complete_callback = _on_complete_hook
+
+    # ---- task watchdog (auto-recovery for stuck workers) ----
+
+    def _watchdog_idle_seconds(task, now: datetime) -> int:  # noqa: ANN001
+        last = task.last_worker_activity_at or task.updated_at or task.created_at
+        if task.watchdog_last_action_at and task.watchdog_last_action_at > last:
+            last = task.watchdog_last_action_at
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        return max(0, int((now - last).total_seconds()))
+
+    def _record_watchdog_report(task, msg_type: str, summary: str, detail: str = "") -> None:  # noqa: ANN001
+        msg = task_manager.handle_report(
+            task_id=task.task_id,
+            msg_type=msg_type,
+            summary=summary,
+            detail=detail,
+            from_tier="orchestrator",
+        )
+        if msg and msg_type == "needs_input":
+            mcp_handler._notify_user_about_task(task.task_id, msg)
+        if settings.data_dir:
+            log_event(settings.data_dir, "task.watchdog", {
+                "task_id": task.task_id,
+                "name": task.name,
+                "action": msg_type,
+                "summary": summary[:300],
+            })
+
+    def _watchdog_loop() -> None:
+        interval = max(5, int(settings.task_watchdog_interval))
+        warn_after = max(0, int(settings.task_watchdog_idle_warn_seconds))
+        restart_after = max(0, int(settings.task_watchdog_idle_restart_seconds))
+        grace = max(0, int(settings.task_watchdog_grace_seconds))
+        max_restarts = max(0, int(settings.task_watchdog_max_restarts))
+        if warn_after <= 0 and restart_after <= 0:
+            logger.info("Task watchdog disabled (warn=%s restart=%s)", warn_after, restart_after)
+            return
+        if restart_after and warn_after and restart_after < warn_after:
+            restart_after = warn_after
+
+        while not stop_event.wait(interval):
+            try:
+                now = datetime.now(timezone.utc)
+                for task in task_manager.active_tasks():
+                    if task.status != "running":
+                        continue
+                    if task.completion_deferred:
+                        continue
+
+                    worker = worker_pool.get_worker(task.task_id) if worker_pool else None
+                    worker_running = worker.is_running if worker else False
+                    idle_secs = _watchdog_idle_seconds(task, now)
+                    if idle_secs < grace:
+                        continue
+
+                    if worker_running:
+                        if warn_after and idle_secs >= warn_after and task.watchdog_state == "none":
+                            msg = (
+                                "Watchdog notice: no MCP activity detected. "
+                                "If you are stuck on a blocking command, abort it and report status."
+                            )
+                            task_manager.send_message(
+                                task_id=task.task_id,
+                                msg_type="instruction",
+                                content=msg,
+                                from_tier="orchestrator",
+                            )
+                            _record_watchdog_report(
+                                task,
+                                "intervention",
+                                f"Watchdog warning sent after {idle_secs}s of inactivity",
+                                detail=msg,
+                            )
+                            task.watchdog_state = "warned"
+                            task.watchdog_last_action_at = now
+                            task_manager._save()
+                            if task.auto_supervise and worker_pool:
+                                worker_pool.request_supervisor_check(task.task_id)
+                            continue
+
+                        if restart_after and idle_secs >= restart_after:
+                            if task.watchdog_restart_count < max_restarts:
+                                _record_watchdog_report(
+                                    task,
+                                    "intervention",
+                                    f"Watchdog restarting worker after {idle_secs}s of inactivity",
+                                )
+                                task.watchdog_state = "restarted"
+                                task.watchdog_restart_count += 1
+                                task.watchdog_last_action_at = now
+                                task_manager._save()
+
+                                if worker_pool:
+                                    worker_pool.stop_task(task.task_id)
+                                try:
+                                    mcp_handler._start_task(task)
+                                except RuntimeError as exc:
+                                    logger.error("Watchdog restart failed for %s: %s", task.task_id, exc)
+                                continue
+
+                            if task.watchdog_state != "needs_input":
+                                summary = "Watchdog: worker still inactive after restart attempts"
+                                detail = (
+                                    f"No MCP activity for {idle_secs}s. "
+                                    "Please check logs or send updated instructions."
+                                )
+                                _record_watchdog_report(task, "needs_input", summary, detail=detail)
+                                task.watchdog_state = "needs_input"
+                                task.watchdog_last_action_at = now
+                                task_manager._save()
+                        continue
+
+                    # Worker not running but task still marked running
+                    if restart_after and idle_secs >= restart_after and task.watchdog_state != "needs_input":
+                        summary = "Watchdog: worker is not running while task is still active"
+                        detail = (
+                            f"Worker has been inactive for {idle_secs}s and is no longer running. "
+                            "Please decide whether to retry or cancel."
+                        )
+                        _record_watchdog_report(task, "needs_input", summary, detail=detail)
+                        task.watchdog_state = "needs_input"
+                        task.watchdog_last_action_at = now
+                        task_manager._save()
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Watchdog loop error: %s", exc)
 
     # ---- restart mechanism ----
 
@@ -1293,7 +1527,7 @@ def create_app() -> FastAPI:
 
     @app.post("/control/restart")
     def control_restart() -> dict[str, str]:
-        """Restart the copenclaw process."""
+        """Restart the COpenClaw process."""
         import threading
         log_event(settings.data_dir, "app.restart", {"source": "http"})
         threading.Thread(target=_restart_app, args=("HTTP /control/restart",), daemon=True, name="app-restart").start()

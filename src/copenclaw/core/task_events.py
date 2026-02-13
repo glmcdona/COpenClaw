@@ -26,7 +26,7 @@ class TaskEvent:
     """A single MCP tool call event for a task."""
     timestamp: str
     role: str           # "worker" | "supervisor" | "orchestrator"
-    tool: str           # e.g. "exec_run", "task_report"
+    tool: str           # e.g. "files_read", "task_report"
     args_summary: str   # truncated args for readability
     result_summary: str # truncated result
     is_error: bool = False

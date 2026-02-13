@@ -44,14 +44,14 @@ def test_status() -> None:
         deps = _make_deps(tmpdir)
         req = ChatRequest(channel="msteams", sender_id="u1", chat_id="c1", text="/status")
         resp = handle_chat(req, **deps)
-        assert "copenclaw" in resp.text
+        assert "COpenClaw" in resp.text
 
 def test_help() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         deps = _make_deps(tmpdir)
         req = ChatRequest(channel="telegram", sender_id="42", chat_id="100", text="/help")
         resp = handle_chat(req, **deps)
-        assert "copenclaw commands" in resp.text
+        assert "COpenClaw commands" in resp.text
         assert "/tasks" in resp.text
         assert "/jobs" in resp.text
         assert "/cancel" in resp.text
@@ -73,18 +73,34 @@ def test_exec_allowed() -> None:
         assert resp.status == "ok"
         assert "hello" in resp.text
 
-def test_pair_approve_flow() -> None:
+def test_unauthorized_user_denied() -> None:
+    """Unauthorized user gets denied with instructions to edit .env."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        deps = _make_deps(tmpdir, allow_from=["admin1"], pairing_mode="pairing")
-        # Non-paired user sends message → gets pairing code
+        deps = _make_deps(tmpdir, allow_from=["admin1"], pairing_mode="allowlist")
         req = ChatRequest(channel="telegram", sender_id="newuser", chat_id="100", text="hello")
         resp = handle_chat(req, **deps)
-        assert resp.status == "pairing"
-        code = resp.text.split(": ")[1]
-        # Admin approves
-        req2 = ChatRequest(channel="telegram", sender_id="admin1", chat_id="100", text=f"/pair approve {code}")
-        resp2 = handle_chat(req2, **deps)
-        assert "Approved" in resp2.text
+        assert resp.status == "denied"
+        assert "not authorized" in resp.text.lower()
+        assert "newuser" in resp.text  # shows the user's ID
+        assert "TELEGRAM_ALLOW_FROM" in resp.text  # shows env var instructions
+
+def test_owner_auto_authorized() -> None:
+    """Owner matching TELEGRAM_OWNER_CHAT_ID is auto-authorized on first contact."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        deps = _make_deps(tmpdir, allow_from=[], pairing_mode="allowlist")
+        deps["owner_id"] = "owner123"
+        monkeypatch_cli = deps["cli"]
+        import types
+        monkeypatch_cli.run_prompt = types.MethodType(lambda self, prompt, **kw: "echo:hello", monkeypatch_cli)
+
+        req = ChatRequest(channel="telegram", sender_id="owner123", chat_id="100", text="hello")
+        resp = handle_chat(req, **deps)
+        # Owner should NOT get an unauthorized message
+        assert resp.status == "ok"
+        assert "not authorized" not in resp.text.lower()
+        # Owner should be in the allowlist now
+        pairing: PairingStore = deps["pairing"]
+        assert pairing.is_allowed("telegram", "owner123")
 
 def test_freetext_calls_copilot(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as tmpdir:

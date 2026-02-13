@@ -51,7 +51,7 @@ logger = logging.getLogger("copenclaw.worker")
 WORKER_INSTRUCTIONS_TEMPLATE_REMOVED = """\
 # Worker Task Instructions
 
-You are a **copenclaw worker** executing a specific task autonomously.
+You are a **COpenClaw worker** executing a specific task autonomously.
 
 ## Your Task
 
@@ -72,20 +72,13 @@ built-in file read/write/edit tools on files there.
 
 **Step 1 — Read the workspace README:**
 
-```
-exec_run command="type {workspace_root}\\README.md"
-```
-(On Linux/Mac use `cat` instead of `type`)
+Use the built-in file tools to read `{workspace_root}\\README.md`.
 
 This tells you what projects and tasks already exist. Study it.
 
 **Step 2 — List existing project folders:**
 
-```
-exec_run command="dir {workspace_root}"
-```
-
-Look at the existing folders. Each folder is a project.
+Use the built-in file tools to list `{workspace_root}` and review existing project folders.
 
 **Step 3 — Decide: existing project or new project?**
 
@@ -95,9 +88,7 @@ Look at the existing folders. Each folder is a project.
 
 **Step 4 — Create your project folder (if new):**
 
-```
-exec_run command="mkdir {workspace_root}\\my-project-name"
-```
+Create your project folder inside `{workspace_root}` (e.g., `{workspace_root}\\my-project-name`).
 
 Then `cd` into it and do ALL your work there.
 
@@ -129,10 +120,6 @@ polluting it breaks other workers.
 ## How to Work
 
 1. **Use MCP tools** to do your work:
-   - `exec_run` — execute shell commands on the host machine
-     (**NOTE:** This runs `cmd.exe` on Windows. Use `dir` not `ls`,
-     `type` not `cat`, etc. For PowerShell commands, prefix with
-     `powershell -Command "..."`)
    - `files_read` — read files from the data directory
    - `files_write` — write files to the task workspace or data directory
    - `task_report` — report progress upward (REQUIRED)
@@ -141,7 +128,7 @@ polluting it breaks other workers.
 
    **File access tip:** Copilot CLI also has built-in file read/write/edit
    tools that work on directories granted via `--add-dir`. Prefer these
-   over `exec_run` for file operations — they are faster and safer.
+   for file operations — they are faster and safer.
 
 2. **Report progress** using `task_report`:
    - `type="progress"` at each major milestone
@@ -188,7 +175,6 @@ polluting it breaks other workers.
 
 - Your task_id for all MCP tool calls is: `{task_id}`
 - Always pass `task_id` when calling task_report, task_check_inbox, etc.
-- You can use exec_run to run any shell command (git, python, npm, etc.)
 - Create files, run builds, deploy — whatever the task requires
 - **All project files go in a project subfolder, NEVER in the workspace root**
 """
@@ -196,7 +182,7 @@ polluting it breaks other workers.
 SUPERVISOR_INSTRUCTIONS_TEMPLATE = """\
 # Supervisor Instructions
 
-You are a **copenclaw supervisor** — a QUALITY GATEKEEPER for a worker task.
+You are a **COpenClaw supervisor** — a QUALITY GATEKEEPER for a worker task.
 
 ## Task Details
 
@@ -219,9 +205,7 @@ You can inspect the worker's files there directly. You also have
 
 **FIRST**, read the project README.md to understand the workspace context:
 
-```
-exec_run command="cat {workspace_root}/README.md"
-```
+Use the built-in file tools to read `{workspace_root}/README.md`.
 
 ## Your Role
 
@@ -244,7 +228,7 @@ whether the task is TRULY complete.
 When the worker reports completion, you MUST VERIFY the outcome:
 
 1. **CHECK OUTPUT:** Inspect `workers-workspace/` for deliverables,
-   or use `exec_run` to verify (dir, type, cat, head, curl, etc.)
+   or use the built-in file tools to verify (list/read files, etc.)
 2. **TEST FUNCTIONALITY:** Actually test that the result works
 3. **FOLLOW INSTRUCTIONS:** The supervisor instructions above tell you
    what to verify
@@ -590,7 +574,7 @@ class WorkerThread:
             if self.resume_session_id:
                 cmd.extend(["-p", f"You are worker for task {self.task_id}. You are RESUMING a previous session — you have full context of your earlier work. Check your inbox with task_check_inbox for new instructions, then continue working."])
             else:
-                cmd.extend(["-p", f"You are worker for task {self.task_id}. Read your instructions from the copilot-instructions.md file and begin working on the task immediately. Use exec_run for shell commands and task_report to report progress."])
+                cmd.extend(["-p", f"You are worker for task {self.task_id}. Read your instructions from the copilot-instructions.md file and begin working on the task immediately. Use MCP tools to report progress and the built-in file tools for filesystem work."])
 
             env = os.environ.copy()
             env.setdefault("TERM", "dumb")

@@ -55,6 +55,7 @@ def handle_chat(
     allow_from: list[str],
     pairing_mode: str,
     data_dir: str,
+    owner_id: Optional[str] = None,
     task_manager: Optional[TaskManager] = None,
     scheduler: Optional[Scheduler] = None,
     worker_pool: Optional[WorkerPool] = None,
@@ -100,8 +101,24 @@ def handle_chat(
         if on_restart:
             import threading
             threading.Thread(target=on_restart, args=(reason,), daemon=True, name="app-restart").start()
-            return ChatResponse(text="🔄 Restarting copenclaw… The app will be back online shortly.")
+            return ChatResponse(text="🔄 Restarting COpenClaw… The app will be back online shortly.")
         return ChatResponse(text="Restart not available — no restart callback configured.")
+
+    if text.startswith("/update"):
+        if req.sender_id not in allow_from and not (owner_id and req.sender_id == owner_id):
+            return ChatResponse(text="Not authorized", status="denied")
+        from copenclaw.core.updater import check_for_updates, apply_update, format_update_check, format_update_result
+        sub = text[len("/update"):].strip().lower()
+        if sub == "apply":
+            log_event(data_dir, f"{req.channel}.update.apply", {"sender_id": req.sender_id}, request_id=rid)
+            info = check_for_updates()
+            if info is None:
+                return ChatResponse(text="✅ COpenClaw is already up to date.")
+            result = apply_update()
+            return ChatResponse(text=format_update_result(result))
+        else:
+            info = check_for_updates()
+            return ChatResponse(text=format_update_check(info))
 
     if text.startswith("/exec "):
         if req.sender_id not in allow_from:
@@ -114,23 +131,6 @@ def handle_chat(
         log_event(data_dir, f"{req.channel}.exec", {"command": cmd}, request_id=rid)
         return ChatResponse(text=output)
 
-    if text.startswith("/pair approve"):
-        parts = text.split()
-        if len(parts) >= 3:
-            code = parts[2]
-            if req.sender_id in allow_from:
-                result = pairing.approve(code)
-                if result:
-                    return ChatResponse(text=f"Approved {result.channel}:{result.sender_id}")
-                return ChatResponse(text="Invalid pairing code")
-            return ChatResponse(text="Not authorized", status="denied")
-
-    if text.startswith("/pair list"):
-        pending = pairing.list_pending()
-        if not pending:
-            return ChatResponse(text="No pending pairing requests.")
-        lines = [f"• `{r.code}` — {r.channel}:{r.sender_id}" for r in pending]
-        return ChatResponse(text="Pending pairing requests:\n" + "\n".join(lines))
 
     # --- task / job management commands ---
     if text == "/tasks":
@@ -181,10 +181,16 @@ def handle_chat(
         }, request_id=rid)
         return ChatResponse(text=f"⏲️ Ping scheduled in {seconds} seconds.")
 
-    # --- pairing gate ---
-    if pairing_mode == "pairing" and req.sender_id not in allow_from and not pairing.is_allowed(req.channel, req.sender_id):
-        code = pairing.request_code(req.channel, req.sender_id)
-        return ChatResponse(text=f"Pairing code: {code}", status="pairing")
+    # --- authorization gate ---
+    if pairing_mode != "open" and req.sender_id not in allow_from and not pairing.is_allowed(req.channel, req.sender_id):
+        # Auto-authorize the owner on first contact
+        if owner_id and req.sender_id == owner_id:
+            pairing.add_allowed(req.channel, req.sender_id)
+            logger.info("Auto-authorized owner %s:%s", req.channel, req.sender_id)
+            # Fall through to normal message handling
+        else:
+            msg = _build_unauthorized_message(req.channel, req.sender_id)
+            return ChatResponse(text=msg, status="denied")
 
     # --- recovery approval (stale tasks from previous run) ---
     if task_manager:
@@ -291,8 +297,8 @@ def handle_chat(
     prompt_with_reminder = (
         f"{text}\n\n"
         "[SYSTEM REMINDER: You are the ORCHESTRATOR. "
-        "For any work request, use tasks_propose to dispatch a worker. "
-        "Do NOT use exec_run for actual work — only for 1-2 quick lookups before proposing. "
+        "For bigger or non-trivial work requests, use tasks_propose to dispatch a worker. "
+        "For small/simple tasks, you may execute directly when the user explicitly asks. "
         "NEVER cancel or stop a task unless the user explicitly asks you to. "
         "NEVER use sleep, timeout, pause, or any blocking/waiting commands. "
         "NEVER run interactive commands that wait for input. "
@@ -345,9 +351,9 @@ def _log_orchestrator(data_dir: str, req: ChatRequest, response: str) -> None:
 
 def _cmd_help() -> ChatResponse:
     help_text = (
-        "🦀 **copenclaw commands:**\n\n"
+        "🦀 **COpenClaw commands:**\n\n"
         "**Status & Info**\n"
-        "`/status` — Check if copenclaw is online\n"
+        "`/status` — Check if COpenClaw is online\n"
         "`/whoami` — Show your channel:sender_id\n"
         "`/help` — This help message\n\n"
         "**Tasks**\n"
@@ -361,9 +367,9 @@ def _cmd_help() -> ChatResponse:
         "`/job <id>` — Job details\n\n"
         "**Admin**\n"
         "`/exec <cmd>` — Run a shell command\n"
-        "`/restart [reason]` — Restart the app\n"
-        "`/pair list` — List pending pairing requests\n"
-        "`/pair approve <code>` — Approve a pairing request\n\n"
+        "`/update` — Check for code updates\n"
+        "`/update apply` — Apply available update\n"
+        "`/restart [reason]` — Restart the app\n\n"
         "Anything else is sent to the AI brain as free text."
     )
     return ChatResponse(text=help_text)
@@ -386,7 +392,7 @@ def _cmd_tasks(tm: Optional[TaskManager]) -> ChatResponse:
     return ChatResponse(text=header + "\n\n".join(lines))
 
 def _cmd_status(tm: Optional[TaskManager], pool: Optional[WorkerPool]) -> ChatResponse:
-    lines = ["copenclaw: ok"]
+    lines = ["COpenClaw: ok"]
     if pool:
         status = pool.status()
         workers_running = [tid for tid, info in status.get("workers", {}).items() if info.get("running")]
@@ -525,6 +531,40 @@ def _cmd_cancel(
 
     return ChatResponse(text=f"Not found: `{target_id}`\n\nUse `/tasks` or `/jobs` to see valid IDs.")
 
+
+# ── Unauthorized message builder ──────────────────────────────
+
+# Map channel names to their env-var prefix for ALLOW_FROM
+_CHANNEL_ENV_VARS: dict[str, str] = {
+    "telegram": "TELEGRAM_ALLOW_FROM",
+    "msteams": "MSTEAMS_ALLOW_FROM",
+    "whatsapp": "WHATSAPP_ALLOW_FROM",
+    "signal": "SIGNAL_ALLOW_FROM",
+    "slack": "SLACK_ALLOW_FROM",
+}
+
+def _build_unauthorized_message(channel: str, sender_id: str) -> str:
+    """Build a helpful message for unauthorized users showing how to get access."""
+    env_var = _CHANNEL_ENV_VARS.get(channel, f"{channel.upper()}_ALLOW_FROM")
+
+    lines = [
+        "⚠️ You are not authorized to use this bot.\n",
+        f"Your {channel} user ID is: {sender_id}\n",
+        "To authorize yourself, add your ID to the allow list:\n",
+        "**Edit your .env file:**",
+        f"  {env_var}={sender_id}",
+        "",
+        "(To allow multiple users, comma-separate them:",
+        f"  {env_var}=existing_id,{sender_id})\n",
+        "**Or from the command line:**",
+        f'  Linux/macOS: echo "{env_var}={sender_id}" >> .env',
+        f'  Windows:     echo {env_var}={sender_id} >> .env\n',
+        "Then restart COpenClaw for changes to take effect.",
+        "",
+        "Alternatively, if you ran the setup script (python scripts/configure.py),",
+        "you can re-run it to reconfigure your channels.",
+    ]
+    return "\n".join(lines)
 
 # ── Helpers ───────────────────────────────────────────────────
 
