@@ -834,7 +834,7 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
-        nonlocal tg_adapter
+        nonlocal tg_adapter, signal_adapter
 
         # Start scheduler thread
         sched_thread = threading.Thread(target=_scheduler_loop, daemon=True)
