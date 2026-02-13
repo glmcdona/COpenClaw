@@ -784,10 +784,6 @@ def create_app() -> FastAPI:
         sender_id = message.get("from", {}).get("id")
         sender_id_str = str(sender_id)
 
-        if settings.pairing_mode == "allowlist":
-            if not settings.telegram_allow_from or sender_id_str not in settings.telegram_allow_from:
-                return
-
         chat_id = message.get("chat", {}).get("id")
         text = message.get("text") or message.get("caption") or ""
         attachments = _extract_telegram_attachments(message)
@@ -819,7 +815,6 @@ def create_app() -> FastAPI:
                 sessions=sessions,
                 cli=cli,
                 allow_from=settings.telegram_allow_from,
-                pairing_mode=settings.pairing_mode,
                 data_dir=settings.data_dir,
                 owner_id=settings.telegram_owner_chat_id,
                 task_manager=task_manager,
@@ -976,10 +971,6 @@ def create_app() -> FastAPI:
         sender_id = message.get("from", {}).get("id")
         sender_id_str = str(sender_id)
 
-        if settings.pairing_mode == "allowlist":
-            if not settings.telegram_allow_from or sender_id_str not in settings.telegram_allow_from:
-                return {"status": "ignored"}
-
         chat_id = message.get("chat", {}).get("id")
         text = message.get("text") or message.get("caption") or ""
         attachments = _extract_telegram_attachments(message)
@@ -1009,7 +1000,6 @@ def create_app() -> FastAPI:
                 sessions=sessions,
                 cli=cli,
                 allow_from=settings.telegram_allow_from,
-                pairing_mode=settings.pairing_mode,
                 data_dir=settings.data_dir,
                 owner_id=settings.telegram_owner_chat_id,
                 task_manager=task_manager,
@@ -1061,10 +1051,6 @@ def create_app() -> FastAPI:
             return {"status": "ignored"}
         sender_id_str = str(sender_id)
 
-        if settings.pairing_mode == "allowlist":
-            if not settings.msteams_allow_from or sender_id_str not in settings.msteams_allow_from:
-                return {"status": "ignored"}
-
         if not text or not service_url or not conversation_id:
             return {"status": "ignored"}
 
@@ -1081,7 +1067,6 @@ def create_app() -> FastAPI:
             sessions=sessions,
             cli=cli,
             allow_from=settings.msteams_allow_from,
-            pairing_mode=settings.pairing_mode,
             data_dir=settings.data_dir,
             owner_id=None,
             task_manager=task_manager,
@@ -1146,10 +1131,6 @@ def create_app() -> FastAPI:
             if not sender or not text:
                 continue
 
-            if settings.pairing_mode == "allowlist":
-                if not settings.whatsapp_allow_from or sender not in settings.whatsapp_allow_from:
-                    continue
-
             if len(text) > 4000:
                 adapter.send_message(to=sender, text="Message too long")
                 continue
@@ -1172,7 +1153,6 @@ def create_app() -> FastAPI:
                 sessions=sessions,
                 cli=cli,
                 allow_from=settings.whatsapp_allow_from,
-                pairing_mode=settings.pairing_mode,
                 data_dir=settings.data_dir,
                 owner_id=None,
                 task_manager=task_manager,
@@ -1205,10 +1185,6 @@ def create_app() -> FastAPI:
         if not sender or not text:
             return
 
-        if settings.pairing_mode == "allowlist":
-            if not settings.signal_allow_from or sender not in settings.signal_allow_from:
-                return
-
         if len(text) > 4000:
             _signal_adapter().send_message(recipient=sender, text="Message too long")
             return
@@ -1230,7 +1206,6 @@ def create_app() -> FastAPI:
             sessions=sessions,
             cli=cli,
             allow_from=settings.signal_allow_from,
-            pairing_mode=settings.pairing_mode,
             data_dir=settings.data_dir,
             owner_id=None,
             task_manager=task_manager,
@@ -1288,10 +1263,6 @@ def create_app() -> FastAPI:
         if not sender or not text or not channel_id:
             return {"status": "ignored"}
 
-        if settings.pairing_mode == "allowlist":
-            if not settings.slack_allow_from or sender not in settings.slack_allow_from:
-                return {"status": "ignored"}
-
         if len(text) > 4000:
             _slack_adapter().send_message(channel=channel_id, text="Message too long")
             return {"status": "rejected"}
@@ -1310,7 +1281,6 @@ def create_app() -> FastAPI:
             sessions=sessions,
             cli=cli,
             allow_from=settings.slack_allow_from,
-            pairing_mode=settings.pairing_mode,
             data_dir=settings.data_dir,
             owner_id=None,
             task_manager=task_manager,

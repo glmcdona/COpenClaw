@@ -1,7 +1,7 @@
 """Simple runtime allowlist for authorized users.
 
-Persists to a JSON file so that owner auto-authorization (and any
-future runtime additions) survive restarts without requiring .env edits.
+Persists to a JSON file so that runtime additions can survive restarts
+without requiring .env edits.
 """
 from __future__ import annotations
 

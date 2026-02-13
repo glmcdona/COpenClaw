@@ -53,7 +53,6 @@ def handle_chat(
     sessions: SessionStore,
     cli: CopilotCli,
     allow_from: list[str],
-    pairing_mode: str,
     data_dir: str,
     owner_id: Optional[str] = None,
     task_manager: Optional[TaskManager] = None,
@@ -182,15 +181,9 @@ def handle_chat(
         return ChatResponse(text=f"⏲️ Ping scheduled in {seconds} seconds.")
 
     # --- authorization gate ---
-    if pairing_mode != "open" and req.sender_id not in allow_from and not pairing.is_allowed(req.channel, req.sender_id):
-        # Auto-authorize the owner on first contact
-        if owner_id and req.sender_id == owner_id:
-            pairing.add_allowed(req.channel, req.sender_id)
-            logger.info("Auto-authorized owner %s:%s", req.channel, req.sender_id)
-            # Fall through to normal message handling
-        else:
-            msg = _build_unauthorized_message(req.channel, req.sender_id)
-            return ChatResponse(text=msg, status="denied")
+    if req.sender_id not in allow_from and not pairing.is_allowed(req.channel, req.sender_id):
+        msg = _build_unauthorized_message(req.channel, req.sender_id)
+        return ChatResponse(text=msg, status="denied")
 
     # --- recovery approval (stale tasks from previous run) ---
     if task_manager:

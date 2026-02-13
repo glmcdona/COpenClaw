@@ -258,7 +258,6 @@ def test_update_command_check():
                 sessions=sessions,
                 cli=cli,
                 allow_from=["user1"],
-                pairing_mode="allowlist",
                 data_dir=tmp,
                 owner_id="user1",
             )
@@ -283,7 +282,6 @@ def test_update_command_denied():
             sessions=sessions,
             cli=cli,
             allow_from=["user1"],
-            pairing_mode="allowlist",
             data_dir=tmp,
             owner_id="user1",
         )
