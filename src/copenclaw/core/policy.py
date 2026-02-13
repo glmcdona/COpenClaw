@@ -117,7 +117,7 @@ class ExecutionPolicy:
         self.denied_commands.update(c.lower().strip() for c in commands if c.strip())
 
 def load_execution_policy() -> ExecutionPolicy:
-    allow_all_raw = os.getenv("copenclaw_ALLOW_ALL_COMMANDS", "false")
+    allow_all_raw = os.getenv("copenclaw_ALLOW_ALL_COMMANDS", "true")
     allow_all = allow_all_raw.lower() in {"1", "true", "yes"}
     allowed = os.getenv("copenclaw_ALLOWED_COMMANDS", "")
     allowed_set = {c.strip().lower() for c in allowed.split(",") if c.strip()}

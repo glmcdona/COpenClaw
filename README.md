@@ -224,13 +224,13 @@ When COpenClaw boots, it creates a **workspace directory** (default: `~/.copencl
 
 ### Security Model
 
-COpenClaw defaults to a minimal, allowlist-first posture:
+COpenClaw defaults to a minimal, allowlist-first posture for who can talk to it:
 
 - **No web UI** — chat connectors only.
 - **Allowlist only** — only IDs in `*_ALLOW_FROM` can interact; add users manually.
 - **Localhost-only MCP** — binds to `127.0.0.1` by default.
-- **Execution policy** — denylist by default; set `COPILOT_CLAW_ALLOW_ALL_COMMANDS=false` for explicit allowlist mode.
-- **Audit log** — every action recorded in `audit.jsonl`.
+- **Execution policy** — allow-all by default with a denylist of dangerous commands; set `COPILOT_CLAW_ALLOW_ALL_COMMANDS=false` for an explicit allowlist.
+- **Audit log** — best-effort event log (messages, execs, jobs, tasks); not a complete security record.
 - **Risk acceptance required** — you must type `I AGREE` (or use `--accept-risks`).
 
 **YOU USE THIS SOFTWARE ENTIRELY AT YOUR OWN RISK.**
@@ -312,7 +312,7 @@ With intermediate states: `paused`, `needs_input`, `recovery_pending`
 | **MCP server** | Exposes 20+ tools (tasks, jobs, exec, messaging, audit) that Copilot CLI calls back into |
 | **No web UI** | No dashboard to expose — chat connectors only, minimal attack surface |
 | **Allowlist auth** | Allowlist-only — only IDs in `*_ALLOW_FROM` can interact |
-| **Audit log** | Every action logged to `audit.jsonl` with request IDs |
+| **Audit log** | Best-effort event log in `audit.jsonl` (messages, execs, jobs, tasks) |
 | **Task watchdog** | Automatic detection and recovery of stuck workers (warn → restart → escalate) |
 | **Telegram images** | Receive and send images via Telegram |
 | **Infinite sessions** | Copilot CLI auto-compresses context at 95% capacity — conversations run indefinitely |
@@ -568,7 +568,7 @@ All configuration is via environment variables (or `.env` file). See [`.env.exam
 | `COPILOT_CLAW_WORKSPACE_DIR` | `.` | Working directory for Copilot CLI |
 | `COPILOT_CLAW_CLI_TIMEOUT` | `7200` | Copilot CLI subprocess timeout (seconds) |
 | `COPILOT_CLAW_MCP_TOKEN` | *(empty)* | Bearer token to protect MCP endpoints |
-| `COPILOT_CLAW_ALLOW_ALL_COMMANDS` | `true` | Allow all shell commands |
+| `COPILOT_CLAW_ALLOW_ALL_COMMANDS` | `true` | Allow all shell commands (set false to use `COPILOT_CLAW_ALLOWED_COMMANDS`) |
 | `COPILOT_CLAW_ALLOWED_COMMANDS` | *(empty)* | Comma-separated allowlist (when above is false) |
 | `COPILOT_CLAW_DENIED_COMMANDS` | `shutdown,reboot,format` | Always-blocked commands |
 | `COPILOT_CLAW_EXEC_TIMEOUT` | `300` | Max seconds per `/exec` command |
