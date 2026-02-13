@@ -10,7 +10,12 @@ from copenclaw.core.tasks import TaskManager
 from copenclaw.integrations.copilot_cli import CopilotCli
 from copenclaw.integrations.telegram import TelegramAdapter
 
-def _make_deps(tmpdir: str, allow_from: list[str] | None = None, pairing_mode: str = "open", with_tasks: bool = False, with_scheduler: bool = False):
+def _make_deps(
+    tmpdir: str,
+    allow_from: list[str] | None = None,
+    with_tasks: bool = False,
+    with_scheduler: bool = False,
+):
     pairing = PairingStore(store_path=f"{tmpdir}/pairing.json")
     sessions = SessionStore(store_path=f"{tmpdir}/sessions.json")
     cli = CopilotCli()
@@ -18,8 +23,7 @@ def _make_deps(tmpdir: str, allow_from: list[str] | None = None, pairing_mode: s
         "pairing": pairing,
         "sessions": sessions,
         "cli": cli,
-        "allow_from": allow_from or [],
-        "pairing_mode": pairing_mode,
+        "allow_from": allow_from or ["42", "u1", "alice", "bob"],
         "data_dir": tmpdir,
     }
     if with_tasks:
@@ -76,7 +80,7 @@ def test_exec_allowed() -> None:
 def test_unauthorized_user_denied() -> None:
     """Unauthorized user gets denied with instructions to edit .env."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        deps = _make_deps(tmpdir, allow_from=["admin1"], pairing_mode="allowlist")
+        deps = _make_deps(tmpdir, allow_from=["admin1"])
         req = ChatRequest(channel="telegram", sender_id="newuser", chat_id="100", text="hello")
         resp = handle_chat(req, **deps)
         assert resp.status == "denied"
@@ -84,10 +88,10 @@ def test_unauthorized_user_denied() -> None:
         assert "newuser" in resp.text  # shows the user's ID
         assert "TELEGRAM_ALLOW_FROM" in resp.text  # shows env var instructions
 
-def test_owner_auto_authorized() -> None:
-    """Owner matching TELEGRAM_OWNER_CHAT_ID is auto-authorized on first contact."""
+def test_owner_not_auto_authorized() -> None:
+    """Owner ID is not auto-authorized unless allowlisted."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        deps = _make_deps(tmpdir, allow_from=[], pairing_mode="allowlist")
+        deps = _make_deps(tmpdir, allow_from=[])
         deps["owner_id"] = "owner123"
         monkeypatch_cli = deps["cli"]
         import types
@@ -95,12 +99,8 @@ def test_owner_auto_authorized() -> None:
 
         req = ChatRequest(channel="telegram", sender_id="owner123", chat_id="100", text="hello")
         resp = handle_chat(req, **deps)
-        # Owner should NOT get an unauthorized message
-        assert resp.status == "ok"
-        assert "not authorized" not in resp.text.lower()
-        # Owner should be in the allowlist now
-        pairing: PairingStore = deps["pairing"]
-        assert pairing.is_allowed("telegram", "owner123")
+        assert resp.status == "denied"
+        assert "not authorized" in resp.text.lower()
 
 def test_freetext_calls_copilot(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as tmpdir:

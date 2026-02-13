@@ -227,8 +227,7 @@ When COpenClaw boots, it creates a **workspace directory** (default: `~/.copencl
 COpenClaw defaults to a minimal, allowlist-first posture:
 
 - **No web UI** — chat connectors only.
-- **Allowlist by default** — only IDs in `*_ALLOW_FROM` plus the owner can interact; the owner auto-authorizes on first contact.
-- **Open mode is opt-in** — dangerous, use only if you mean it.
+- **Allowlist only** — only IDs in `*_ALLOW_FROM` can interact; add users manually.
 - **Localhost-only MCP** — binds to `127.0.0.1` by default.
 - **Execution policy** — denylist by default; set `COPILOT_CLAW_ALLOW_ALL_COMMANDS=false` for explicit allowlist mode.
 - **Audit log** — every action recorded in `audit.jsonl`.
@@ -312,7 +311,7 @@ With intermediate states: `paused`, `needs_input`, `recovery_pending`
 | **Scheduled jobs** | One-shot or cron-recurring jobs delivered to your chat channel on schedule |
 | **MCP server** | Exposes 20+ tools (tasks, jobs, exec, messaging, audit) that Copilot CLI calls back into |
 | **No web UI** | No dashboard to expose — chat connectors only, minimal attack surface |
-| **Allowlist auth** | Two auth modes — `allowlist` (default, owner auto-authorized) and `open` |
+| **Allowlist auth** | Allowlist-only — only IDs in `*_ALLOW_FROM` can interact |
 | **Audit log** | Every action logged to `audit.jsonl` with request IDs |
 | **Task watchdog** | Automatic detection and recovery of stuck workers (warn → restart → escalate) |
 | **Telegram images** | Receive and send images via Telegram |
@@ -368,7 +367,7 @@ If you know your Telegram user ID, set it directly in `.env`:
 TELEGRAM_OWNER_CHAT_ID=123456789
 TELEGRAM_ALLOW_FROM=123456789
 ```
-The owner chat ID is auto-authorized on first contact — no extra setup needed.
+Only IDs in `TELEGRAM_ALLOW_FROM` are authorized — add yourself there.
 
 **Step 3: Start copenclaw**
 
@@ -381,23 +380,13 @@ COpenClaw automatically deletes any existing webhook and starts long-polling. No
 
 ### Adding other users
 
-When someone new messages the bot in **allowlist mode** (the default), COpenClaw:
-
-1. **Does NOT process their message** — it's dropped
-2. **Replies with their user ID** and instructions to add it to `.env`
+When someone new messages the bot, COpenClaw rejects the request and replies with their user ID plus instructions to add it to `.env`.
 
 To authorize a new user, add their ID to the appropriate `*_ALLOW_FROM` variable in `.env` and restart:
 ```
 TELEGRAM_ALLOW_FROM=123456789,987654321
 ```
-The user is then permanently authorized. The owner (`TELEGRAM_OWNER_CHAT_ID`) is auto-authorized on first contact.
-
-**Auth modes** (set via `COPILOT_CLAW_PAIRING_MODE`):
-
-| Mode | Behavior |
-|---|---|
-| `allowlist` (default) | Only user IDs in `*_ALLOW_FROM` env vars + owner can interact. |
-| `open` | Everyone can message the bot. **Dangerous — not recommended.** |
+The user is then permanently authorized.
 
 ### Other channels
 
@@ -578,7 +567,6 @@ All configuration is via environment variables (or `.env` file). See [`.env.exam
 | `COPILOT_CLAW_DATA_DIR` | `.data` | Directory for jobs, sessions, tasks, audit log |
 | `COPILOT_CLAW_WORKSPACE_DIR` | `.` | Working directory for Copilot CLI |
 | `COPILOT_CLAW_CLI_TIMEOUT` | `7200` | Copilot CLI subprocess timeout (seconds) |
-| `COPILOT_CLAW_PAIRING_MODE` | `allowlist` | Auth mode: `open` or `allowlist` |
 | `COPILOT_CLAW_MCP_TOKEN` | *(empty)* | Bearer token to protect MCP endpoints |
 | `COPILOT_CLAW_ALLOW_ALL_COMMANDS` | `true` | Allow all shell commands |
 | `COPILOT_CLAW_ALLOWED_COMMANDS` | *(empty)* | Comma-separated allowlist (when above is false) |

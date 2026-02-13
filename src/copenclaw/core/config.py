@@ -33,7 +33,6 @@ class Settings:
     slack_bot_token: str | None
     slack_signing_secret: str | None
     slack_allow_from: list[str]
-    pairing_mode: str
     msteams_validate_token: bool
     webhook_rate_limit_calls: int
     webhook_rate_limit_seconds: int
@@ -82,7 +81,6 @@ class Settings:
             slack_bot_token=os.getenv("SLACK_BOT_TOKEN"),
             slack_signing_secret=os.getenv("SLACK_SIGNING_SECRET"),
             slack_allow_from=[v.strip() for v in slack_allow.split(",") if v.strip()],
-            pairing_mode=os.getenv("copenclaw_PAIRING_MODE", "allowlist"),
             msteams_validate_token=os.getenv("MSTEAMS_VALIDATE_TOKEN", "true").lower() in {"1", "true", "yes"},
             webhook_rate_limit_calls=int(os.getenv("copenclaw_WEBHOOK_RATE_LIMIT_CALLS", "30")),
             webhook_rate_limit_seconds=int(os.getenv("copenclaw_WEBHOOK_RATE_LIMIT_SECONDS", "60")),
