@@ -359,6 +359,7 @@ source .venv/bin/activate
 info "Installing COpenClaw and dependencies..."
 pip install -e . --quiet
 ok "COpenClaw installed in .venv"
+VENV_PYTHON="$PROJECT_DIR/.venv/bin/python"
 
 # ── Step 4: Interactive configuration ─────────────────────────────────────
 
@@ -377,12 +378,12 @@ step "5/6" "Autostart configuration..."
 SKIP_AUTOSTART="${SKIP_AUTOSTART:-false}"
 if [ "$SKIP_AUTOSTART" = "true" ]; then
     info "Skipped (SKIP_AUTOSTART=true)."
+elif [ ! -t 0 ]; then
+    info "Skipped autostart (non-interactive install)."
 else
     echo ""
     read -rp "  Set COpenClaw to start automatically on login? (y/N): " want_autostart
     if [[ "$want_autostart" =~ ^[Yy] ]]; then
-        VENV_PYTHON="$PROJECT_DIR/.venv/bin/python"
-
         if [ "$(uname -s)" = "Darwin" ]; then
             # ── macOS: launchd ────────────────────────────────────────
             PLIST_DIR="$HOME/Library/LaunchAgents"
