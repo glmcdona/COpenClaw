@@ -138,7 +138,7 @@ class TestInstructionsFile:
         )
         assert "task-abc123" in result
         assert "Build a hello world app" in result
-        assert "exec_run" in result
+        assert "files_read" in result
         assert "task_report" in result
 
     def test_supervisor_template_formats(self):
@@ -490,6 +490,43 @@ class TestE2ETaskFlow:
         import json
         return json.loads(content)
 
+    def test_completion_hook_fires_without_on_complete(self, tmp_path):
+        data_dir = str(tmp_path / "data")
+        os.makedirs(data_dir)
+        handler = self._make_handler(data_dir)
+        tm = handler.task_manager
+        task = tm.create_task(
+            name="demo-task",
+            prompt="Do the demo work",
+            channel="telegram",
+            target="12345",
+        )
+
+        event = threading.Event()
+        captured = {}
+
+        def _hook(prompt: str, channel: str, target: str, service_url: str, source_task_name: str) -> None:
+            captured["prompt"] = prompt
+            captured["channel"] = channel
+            captured["target"] = target
+            captured["source_task_name"] = source_task_name
+            event.set()
+
+        handler.on_complete_callback = _hook
+
+        handler._tool_task_report({
+            "task_id": task.task_id,
+            "type": "completed",
+            "summary": "All done",
+            "detail": "Everything finished",
+            "from_tier": "worker",
+        })
+
+        assert event.wait(1)
+        assert "task_id=" in captured["prompt"]
+        assert "Completion summary: All done" in captured["prompt"]
+        assert "No on_complete hook was provided" in captured["prompt"]
+
     @patch("copenclaw.core.worker.subprocess.Popen")
     @patch("copenclaw.integrations.copilot_cli.shutil.which", return_value="copilot")
     @patch("copenclaw.mcp.protocol.TelegramAdapter")
@@ -755,7 +792,7 @@ class TestE2ETaskFlow:
 class TestInterSessionMessaging:
     """Tests for the bidirectional messaging between tiers via MCP tools."""
 
-    def _make_handler(self, data_dir: str) -> MCPProtocolHandler:
+    def _make_handler(self, data_dir: str, telegram_token: str | None = None) -> MCPProtocolHandler:
         tm = TaskManager(data_dir=data_dir)
         pool = WorkerPool(mcp_server_url="http://127.0.0.1:18790/mcp")
         scheduler = Scheduler()
@@ -763,6 +800,7 @@ class TestInterSessionMessaging:
         return MCPProtocolHandler(
             scheduler=scheduler,
             data_dir=data_dir,
+            telegram_token=telegram_token,
             task_manager=tm,
             worker_pool=pool,
             owner_chat_id="12345",
@@ -924,11 +962,11 @@ class TestInterSessionMessaging:
 
         # Also register an event in the event stream
         event_log = handler.event_registry.get_or_create(task.task_id, task.working_dir)
-        event_log.append("worker", "exec_run", "ls", "file1 file2")
+        event_log.append("worker", "files_read", "README.md", "file1 file2")
 
         result = self._call_tool(handler, "task_read_peer", {"task_id": task.task_id})
         # Check event stream section
-        assert "exec_run" in result["logs"]
+        assert "files_read" in result["logs"]
         # Check worker stdout section
         assert "Worker line 1" in result["logs"]
         assert "Worker line 2" in result["logs"]
@@ -960,7 +998,7 @@ class TestInterSessionMessaging:
 class TestDeferredCompletion:
     """Worker completion is deferred when supervisor is active."""
 
-    def _make_handler(self, data_dir: str) -> MCPProtocolHandler:
+    def _make_handler(self, data_dir: str, telegram_token: str | None = None) -> MCPProtocolHandler:
         tm = TaskManager(data_dir=data_dir)
         pool = WorkerPool(mcp_server_url="http://127.0.0.1:18790/mcp")
         scheduler = Scheduler()
@@ -968,6 +1006,7 @@ class TestDeferredCompletion:
         return MCPProtocolHandler(
             scheduler=scheduler,
             data_dir=data_dir,
+            telegram_token=telegram_token,
             task_manager=tm,
             worker_pool=pool,
             owner_chat_id="12345",
@@ -1195,7 +1234,7 @@ class TestTaskListingE2E:
 class TestAuditRoleContext:
     """Audit events should include role and task_id."""
 
-    def _make_handler(self, data_dir: str) -> MCPProtocolHandler:
+    def _make_handler(self, data_dir: str, telegram_token: str | None = None) -> MCPProtocolHandler:
         tm = TaskManager(data_dir=data_dir)
         pool = WorkerPool(mcp_server_url="http://127.0.0.1:18790/mcp")
         scheduler = Scheduler()
@@ -1203,6 +1242,7 @@ class TestAuditRoleContext:
         return MCPProtocolHandler(
             scheduler=scheduler,
             data_dir=data_dir,
+            telegram_token=telegram_token,
             task_manager=tm,
             worker_pool=pool,
             owner_chat_id="12345",
@@ -1219,8 +1259,8 @@ class TestAuditRoleContext:
         content = response["result"]["content"][0]["text"]
         return json.loads(content)
 
-    def test_exec_run_audit_includes_role_and_task(self, tmp_path):
-        """exec_run called by a worker should log 'worker.exec.run' with task_id."""
+    def test_files_write_audit_includes_role_and_task(self, tmp_path):
+        """files_write called by a worker should log 'worker.files.write' with task_id."""
         data_dir = str(tmp_path / "data")
         os.makedirs(data_dir)
         handler = self._make_handler(data_dir)
@@ -1228,7 +1268,7 @@ class TestAuditRoleContext:
         task = handler.task_manager.create_task(name="Audit test", prompt="test")
 
         self._call_tool_with_context(
-            handler, "exec_run", {"command": "echo hello"},
+            handler, "files_write", {"path": "note.txt", "content": "hello"},
             task_id=task.task_id, role="worker",
         )
 
@@ -1239,10 +1279,10 @@ class TestAuditRoleContext:
         with open(audit_path, "r") as f:
             events = [json.loads(line) for line in f if line.strip()]
 
-        exec_events = [e for e in events if "exec.run" in e["type"]]
-        assert len(exec_events) >= 1
-        last = exec_events[-1]
-        assert last["type"] == "worker.exec.run"
+        file_events = [e for e in events if "files.write" in e["type"]]
+        assert len(file_events) >= 1
+        last = file_events[-1]
+        assert last["type"] == "worker.files.write"
         assert last["payload"]["task_id"] == task.task_id
         assert last["payload"]["task_name"] == "Audit test"
 
@@ -1253,7 +1293,7 @@ class TestAuditRoleContext:
         handler = self._make_handler(data_dir)
 
         self._call_tool_with_context(
-            handler, "exec_run", {"command": "echo test"},
+            handler, "files_write", {"path": "note2.txt", "content": "test"},
         )
 
         import json
@@ -1261,8 +1301,8 @@ class TestAuditRoleContext:
         with open(audit_path, "r") as f:
             events = [json.loads(line) for line in f if line.strip()]
 
-        exec_events = [e for e in events if "exec.run" in e["type"]]
-        assert exec_events[-1]["type"] == "orchestrator.exec.run"
+        file_events = [e for e in events if "files.write" in e["type"]]
+        assert file_events[-1]["type"] == "orchestrator.files.write"
 
     def test_task_report_audit_includes_role(self, tmp_path):
         """task_report audit events should be prefixed with role."""
@@ -1288,6 +1328,102 @@ class TestAuditRoleContext:
         assert len(report_events) >= 1
         assert report_events[-1]["type"] == "worker.task.report.progress"
 
+    @patch("copenclaw.mcp.protocol.TelegramAdapter")
+    def test_send_message_audit_includes_details(self, mock_telegram, tmp_path):
+        """send_message audit events should include channel/target and image usage."""
+        data_dir = str(tmp_path / "data")
+        os.makedirs(data_dir)
+        handler = self._make_handler(data_dir, telegram_token="token")
+
+        task = handler.task_manager.create_task(name="Send audit", prompt="test")
+
+        self._call_tool_with_context(
+            handler,
+            "send_message",
+            {"channel": "telegram", "target": "999", "text": "hello"},
+            task_id=task.task_id,
+            role="worker",
+        )
+
+        import json
+        audit_path = os.path.join(data_dir, "audit.jsonl")
+        with open(audit_path, "r") as f:
+            events = [json.loads(line) for line in f if line.strip()]
+
+        send_events = [e for e in events if e["type"] == "worker.send_message"]
+        assert len(send_events) >= 1
+        payload = send_events[-1]["payload"]
+        assert payload["channel"] == "telegram"
+        assert payload["target"] == "999"
+        assert payload["message_type"] == "text"
+        assert payload["image_path_used"] is False
+
+
+# ── Test: send_message visibility in supervisor views ──────────
+
+class TestSendMessageVisibility:
+    """send_message tool calls should be visible to supervisors."""
+
+    def _make_handler(self, data_dir: str) -> MCPProtocolHandler:
+        tm = TaskManager(data_dir=data_dir)
+        pool = WorkerPool(mcp_server_url="http://127.0.0.1:18790/mcp")
+        scheduler = Scheduler()
+        policy = ExecutionPolicy(allow_all=True)
+        return MCPProtocolHandler(
+            scheduler=scheduler,
+            data_dir=data_dir,
+            telegram_token="token",
+            task_manager=tm,
+            worker_pool=pool,
+            owner_chat_id="12345",
+            execution_policy=policy,
+        )
+
+    def _call_tool_with_context(self, handler, tool_name, args, task_id=None, role=None):
+        response = handler.handle_request(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": tool_name, "arguments": args}},
+            task_id=task_id, role=role,
+        )
+        import json
+        content = response["result"]["content"][0]["text"]
+        return json.loads(content)
+
+    @patch("copenclaw.mcp.protocol.TelegramAdapter")
+    def test_send_message_visible_in_task_read_peer(self, mock_telegram, tmp_path):
+        data_dir = str(tmp_path / "data")
+        os.makedirs(data_dir)
+        handler = self._make_handler(data_dir)
+
+        task = handler.task_manager.create_task(name="Send visibility", prompt="test")
+        handler.task_manager.update_status(task.task_id, "running")
+
+        self._call_tool_with_context(
+            handler,
+            "send_message",
+            {"channel": "telegram", "target": "999", "text": "hello"},
+            task_id=task.task_id,
+            role="worker",
+        )
+
+        result = self._call_tool_with_context(
+            handler,
+            "task_read_peer",
+            {"task_id": task.task_id},
+            task_id=task.task_id,
+            role="supervisor",
+        )
+        logs = result["logs"]
+        assert "send_message" in logs
+        assert "message_type=text" in logs
+        assert "channel=telegram" in logs
+        assert "target=999" in logs
+        assert "image_path=no" in logs
+
+        status = self._call_tool_with_context(
+            handler, "tasks_status", {"task_id": task.task_id}
+        )
+        assert "Sent user message" in status["timeline"]
 # ── Test: files_write MCP tool (Fix 3b) ─────────────────────
 
 class TestFilesWrite:

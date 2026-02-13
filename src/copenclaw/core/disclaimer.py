@@ -1,6 +1,6 @@
 """Security disclaimer and risk-acceptance gate.
 
-Before copenclaw starts, the user must explicitly acknowledge the risks.
+Before COpenClaw starts, the user must explicitly acknowledge the risks.
 Acceptance is recorded in a marker file inside the data directory so the
 prompt is only shown once.
 """
@@ -23,7 +23,7 @@ DISCLAIMER_RISKS = [
     (
         "ACCOUNT TAKEOVER = DEVICE TAKEOVER",
         "If an attacker compromises any of your linked chat accounts, they gain full remote control "
-        "of this computer through copenclaw.",
+        "of this computer through COpenClaw.",
     ),
     (
         "AI MISTAKES",
@@ -49,7 +49,7 @@ DISCLAIMER_RISKS = [
 ]
 
 DISCLAIMER_RECOMMENDATION = (
-    "Run copenclaw inside a Docker container or virtual machine to limit the blast radius of any "
+    "Run COpenClaw inside a Docker container or virtual machine to limit the blast radius of any "
     "incident. Never run on a machine with access to sensitive financial accounts or irreplaceable "
     "data without appropriate isolation."
 )
@@ -68,7 +68,7 @@ def format_disclaimer_plain() -> str:
         "  ⚠️  SECURITY WARNING  ⚠️".center(width),
         border,
         "",
-        "  copenclaw grants an AI agent FULL ACCESS to your computer.",
+        "  COpenClaw grants an AI agent FULL ACCESS to your computer.",
         "  By proceeding, you acknowledge and accept the following risks:",
         "",
     ]

@@ -46,5 +46,61 @@ def version() -> None:
 
     typer.echo(__version__)
 
+@app.command()
+def update(
+    check_only: bool = typer.Option(False, "--check", help="Only check for updates, don't apply"),
+    apply_now: bool = typer.Option(False, "--apply", help="Apply update without prompting"),
+) -> None:
+    """Check for and apply COpenClaw updates from git."""
+    _load_env()
+
+    from copenclaw.core.updater import (
+        check_for_updates,
+        apply_update,
+        format_update_check,
+        format_update_result,
+    )
+
+    typer.echo("Checking for updates...")
+    info = check_for_updates()
+
+    if info is None:
+        typer.echo("✅ COpenClaw is up to date.")
+        raise typer.Exit()
+
+    # Show update info
+    typer.echo(format_update_check(info))
+
+    if check_only:
+        raise typer.Exit()
+
+    # Warn about conflicts
+    if info.has_conflicts:
+        typer.echo("")
+        typer.secho(
+            "⚠️  WARNING: Some local files conflict with the update.",
+            fg=typer.colors.YELLOW,
+            bold=True,
+        )
+        if not apply_now:
+            proceed = typer.confirm("Do you want to proceed anyway?", default=False)
+            if not proceed:
+                typer.echo("Update cancelled.")
+                raise typer.Exit()
+
+    # Confirm if not --apply
+    if not apply_now:
+        proceed = typer.confirm("Apply this update?", default=True)
+        if not proceed:
+            typer.echo("Update cancelled.")
+            raise typer.Exit()
+
+    typer.echo("\nApplying update...")
+    result = apply_update()
+    typer.echo(format_update_result(result))
+
+    if result.success:
+        typer.echo("\nRestart COpenClaw to load the new code.")
+
 if __name__ == "__main__":
     app()

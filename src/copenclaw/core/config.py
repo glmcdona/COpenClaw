@@ -11,6 +11,11 @@ class Settings:
     data_dir: str
     workspace_dir: str | None
     copilot_cli_timeout: int
+    task_watchdog_interval: int
+    task_watchdog_grace_seconds: int
+    task_watchdog_idle_warn_seconds: int
+    task_watchdog_idle_restart_seconds: int
+    task_watchdog_max_restarts: int
     telegram_bot_token: str | None
     telegram_webhook_secret: str | None
     telegram_allow_from: list[str]
@@ -29,7 +34,6 @@ class Settings:
     slack_signing_secret: str | None
     slack_allow_from: list[str]
     pairing_mode: str
-    pairing_code_length: int
     msteams_validate_token: bool
     webhook_rate_limit_calls: int
     webhook_rate_limit_seconds: int
@@ -56,6 +60,11 @@ class Settings:
             data_dir=os.getenv("copenclaw_DATA_DIR") or default_data_dir,
             workspace_dir=os.getenv("copenclaw_WORKSPACE_DIR") or default_workspace,
             copilot_cli_timeout=int(os.getenv("copenclaw_CLI_TIMEOUT", "7200")),
+            task_watchdog_interval=int(os.getenv("copenclaw_TASK_WATCHDOG_INTERVAL", "60")),
+            task_watchdog_grace_seconds=int(os.getenv("copenclaw_TASK_WATCHDOG_GRACE_SECONDS", "600")),
+            task_watchdog_idle_warn_seconds=int(os.getenv("copenclaw_TASK_WATCHDOG_IDLE_WARN_SECONDS", "1800")),
+            task_watchdog_idle_restart_seconds=int(os.getenv("copenclaw_TASK_WATCHDOG_IDLE_RESTART_SECONDS", "3600")),
+            task_watchdog_max_restarts=int(os.getenv("copenclaw_TASK_WATCHDOG_MAX_RESTARTS", "1")),
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN"),
             telegram_webhook_secret=os.getenv("TELEGRAM_WEBHOOK_SECRET"),
             telegram_allow_from=[v.strip() for v in telegram_allow.split(",") if v.strip()],
@@ -73,8 +82,7 @@ class Settings:
             slack_bot_token=os.getenv("SLACK_BOT_TOKEN"),
             slack_signing_secret=os.getenv("SLACK_SIGNING_SECRET"),
             slack_allow_from=[v.strip() for v in slack_allow.split(",") if v.strip()],
-            pairing_mode=os.getenv("copenclaw_PAIRING_MODE", "pairing"),
-            pairing_code_length=int(os.getenv("copenclaw_PAIRING_CODE_LENGTH", "6")),
+            pairing_mode=os.getenv("copenclaw_PAIRING_MODE", "allowlist"),
             msteams_validate_token=os.getenv("MSTEAMS_VALIDATE_TOKEN", "true").lower() in {"1", "true", "yes"},
             webhook_rate_limit_calls=int(os.getenv("copenclaw_WEBHOOK_RATE_LIMIT_CALLS", "30")),
             webhook_rate_limit_seconds=int(os.getenv("copenclaw_WEBHOOK_RATE_LIMIT_SECONDS", "60")),

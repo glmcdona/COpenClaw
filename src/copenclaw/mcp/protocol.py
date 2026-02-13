@@ -4,8 +4,8 @@ Implements the Model Context Protocol over HTTP (Streamable HTTP transport).
 Copilot CLI POSTs JSON-RPC requests to a single endpoint and expects
 JSON-RPC responses back.
 
-Includes both infrastructure tools (jobs, exec, messaging) and the
-task dispatch / ITC protocol tools (tasks_*, task_report, task_check_inbox).
+    Includes infrastructure tools (jobs, messaging, file access) and the
+    task dispatch / ITC protocol tools (tasks_*, task_report, task_check_inbox).
 """
 from __future__ import annotations
 
@@ -31,8 +31,7 @@ from copenclaw.core.logging_config import (
     log_task_event_central,
 )
 from copenclaw.core.names import generate_name
-from copenclaw.core.pairing import PairingStore
-from copenclaw.core.policy import ExecutionPolicy, load_execution_policy, run_command
+from copenclaw.core.policy import ExecutionPolicy, load_execution_policy
 from copenclaw.core.scheduler import Scheduler
 from copenclaw.core.task_events import TaskEventRegistry
 from copenclaw.core.tasks import TaskManager, _now
@@ -102,15 +101,6 @@ INFRA_TOOLS = [
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
-        "name": "exec_run",
-        "description": "Execute a shell command on the host machine (subject to execution policy).",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"command": {"type": "string"}},
-            "required": ["command"],
-        },
-    },
-    {
         "name": "send_message",
         "description": "Send a message to a chat channel (Telegram, Teams, WhatsApp, Signal, or Slack).",
         "inputSchema": {
@@ -154,20 +144,6 @@ INFRA_TOOLS = [
             "properties": {"limit": {"type": "integer", "default": 100}},
         },
     },
-    {
-        "name": "pairing_pending",
-        "description": "List pending pairing codes waiting for approval.",
-        "inputSchema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "pairing_approve",
-        "description": "Approve a pending pairing code.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"code": {"type": "string"}},
-            "required": ["code"],
-        },
-    },
     # ── MCP server management tools ──
     {
         "name": "mcp_server_add",
@@ -204,7 +180,7 @@ INFRA_TOOLS = [
     },
     {
         "name": "app_restart",
-        "description": "Restart the entire copenclaw application. Use this when the app needs a fresh start, e.g. after configuration changes, code updates, or to recover from a bad state. The process will gracefully shut down all workers and supervisors, then re-launch itself.",
+        "description": "Restart the entire COpenClaw application. Use this when the app needs a fresh start, e.g. after configuration changes, code updates, or to recover from a bad state. The process will gracefully shut down all workers and supervisors, then re-launch itself.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -414,7 +390,6 @@ class MCPProtocolHandler:
     def __init__(
         self,
         scheduler: Scheduler,
-        pairing: PairingStore | None = None,
         data_dir: str | None = None,
         telegram_token: str | None = None,
         msteams_creds: dict | None = None,
@@ -425,7 +400,6 @@ class MCPProtocolHandler:
         execution_policy: ExecutionPolicy | None = None,
     ) -> None:
         self.scheduler = scheduler
-        self.pairing = pairing
         self.data_dir = data_dir
         self.telegram_token = telegram_token
         self.msteams_creds = msteams_creds
@@ -437,7 +411,7 @@ class MCPProtocolHandler:
         self._execution_policy = execution_policy or load_execution_policy()
         # Per-task event stream registry
         self.event_registry = TaskEventRegistry()
-        # Callback fired when a task reaches a terminal state and has an on_complete hook.
+        # Callback fired when a task reaches a terminal state (includes on_complete hook if provided).
         # Signature: on_complete_callback(prompt: str, channel: str, target: str, service_url: str, source_task_name: str) -> None
         self.on_complete_callback: Any = None
         # Callback to restart the entire app process.
@@ -515,7 +489,7 @@ class MCPProtocolHandler:
         return {
             "protocolVersion": "2025-03-26",
             "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": {"name": "copenclaw", "version": "0.2.0"},
+            "serverInfo": {"name": "COpenClaw", "version": "0.2.0"},
         }
 
     def _handle_tools_list(self, params: dict[str, Any], role: str | None = None) -> dict[str, Any]:
@@ -532,6 +506,11 @@ class MCPProtocolHandler:
         name = params.get("name", "")
         arguments = params.get("arguments", {})
         args_str = json.dumps(arguments)[:2000]
+        event_args_summary = json.dumps(arguments, default=str)[:4000]
+        send_message_summary = ""
+        if name == "send_message":
+            send_message_summary, _ = self._summarize_send_message_args(arguments)
+            event_args_summary = send_message_summary
         logger.info("MCP tools/call: %s args=%s (task=%s role=%s)", name, args_str[:200], task_id, role)
         # Detailed MCP tool call log
         append_to_file(
@@ -551,6 +530,9 @@ class MCPProtocolHandler:
             task_obj = self.task_manager.get(task_id)
             if task_obj:
                 task_obj.last_worker_activity_at = _now()
+                if task_obj.watchdog_state in {"warned", "restarted"}:
+                    task_obj.watchdog_state = "none"
+                    task_obj.watchdog_last_action_at = None
                 self.task_manager._save()
 
         try:
@@ -558,12 +540,20 @@ class MCPProtocolHandler:
             _duration_ms = (_time.monotonic() - _t0) * 1000
             result_str = json.dumps(result, default=str)
 
+            if name == "send_message" and task_id and role == "worker" and self.task_manager:
+                task = self.task_manager.get(task_id)
+                if task:
+                    summary = send_message_summary or self._summarize_send_message_args(arguments)[0]
+                    task.add_timeline("message_sent", f"Sent user message ({summary})")
+                    task.updated_at = _now()
+                    self.task_manager._save()
+
             # Log tool call details — wrapped in its own try/except so
             # logging failures never turn a successful tool call into an error.
             try:
                 self._log_task_event(
                     task_id, role or "unknown", name,
-                    json.dumps(arguments, default=str)[:4000],
+                    event_args_summary,
                     result_str[:8000],
                     is_error=False,
                 )
@@ -585,7 +575,7 @@ class MCPProtocolHandler:
                     task_id=task_id or "",
                     role=role or "orchestrator",
                     tool=name,
-                    args_summary=json.dumps(arguments, default=str)[:4000],
+                    args_summary=event_args_summary,
                     result_summary=result_str[:4000],
                     is_error=False,
                 )
@@ -603,7 +593,7 @@ class MCPProtocolHandler:
             # Log error to per-task event stream
             self._log_task_event(
                 task_id, role or "unknown", name,
-                json.dumps(arguments, default=str)[:4000],
+                event_args_summary,
                 err_str[:4000],
                 is_error=True,
             )
@@ -628,7 +618,7 @@ class MCPProtocolHandler:
                 task_id=task_id or "",
                 role=role or "orchestrator",
                 tool=name,
-                args_summary=json.dumps(arguments, default=str)[:4000],
+                args_summary=event_args_summary,
                 result_summary=err_str[:4000],
                 is_error=True,
             )
@@ -649,8 +639,6 @@ class MCPProtocolHandler:
             return self._tool_jobs_runs(args)
         if name == "jobs_clear_all":
             return self._tool_jobs_clear_all(args)
-        if name == "exec_run":
-            return self._tool_exec_run(args)
         if name == "send_message":
             return self._tool_send_message(args)
         if name == "files_read":
@@ -659,10 +647,6 @@ class MCPProtocolHandler:
             return self._tool_files_write(args)
         if name == "audit_read":
             return self._tool_audit_read(args)
-        if name == "pairing_pending":
-            return self._tool_pairing_pending(args)
-        if name == "pairing_approve":
-            return self._tool_pairing_approve(args)
         # MCP server management tools
         if name == "mcp_server_add":
             return self._tool_mcp_server_add(args)
@@ -774,30 +758,29 @@ class MCPProtocolHandler:
                     payload["task_name"] = task.name
         log_event(self.data_dir, event_type, payload)
 
-    def _tool_exec_run(self, args: dict[str, Any]) -> dict:
-        command = args["command"]
-        logger.info("exec_run requested: %s", command[:200])
-        logger.debug(
-            "exec_run policy: allow_all=%s, allowed=%s, denied=%s",
-            self._execution_policy.allow_all,
-            self._execution_policy.allowed_commands or "(empty)",
-            self._execution_policy.denied_commands or "(empty)",
+    @staticmethod
+    def _summarize_send_message_args(args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        channel = args.get("channel", "")
+        target = str(args.get("target", ""))
+        image_path = args.get("image_path")
+        message_type = "image" if image_path else "text"
+        summary = (
+            f"message_type={message_type} channel={channel} target={target} "
+            f"image_path={'yes' if image_path else 'no'}"
         )
-        cwd: str | None = None
-        task_id = getattr(self, "_current_task_id", None)
-        if task_id and self.task_manager:
-            task = self.task_manager.get(task_id)
-            if task:
-                workspace = os.path.join(task.working_dir, "workspace")
-                cwd = workspace if os.path.isdir(workspace) else task.working_dir
-        output = run_command(command, self._execution_policy, cwd=cwd)
-        self._audit("exec.run", {"command": command[:200]})
-        return {"output": output}
+        payload = {
+            "channel": channel,
+            "target": target,
+            "message_type": message_type,
+            "image_path_used": bool(image_path),
+        }
+        return summary, payload
 
     def _tool_send_message(self, args: dict[str, Any]) -> dict:
         channel = args["channel"]
         text = args.get("text") or ""
         image_path = args.get("image_path")
+        _, audit_payload = self._summarize_send_message_args(args)
         if channel == "telegram":
             if not self.telegram_token:
                 raise ValueError("Telegram not configured")
@@ -809,8 +792,10 @@ class MCPProtocolHandler:
                     adapter.send_message(chat_id=int(args["target"]), text=caption)
                 else:
                     adapter.send_photo(chat_id=int(args["target"]), photo_path=image_path, caption=caption)
+                self._audit("send_message", audit_payload)
                 return {"status": "sent", "channel": "telegram"}
             adapter.send_message(chat_id=int(args["target"]), text=text)
+            self._audit("send_message", audit_payload)
             return {"status": "sent", "channel": "telegram"}
         if channel == "teams":
             if not self.msteams_creds:
@@ -823,6 +808,7 @@ class MCPProtocolHandler:
                 app_password=self.msteams_creds["app_password"],
                 tenant_id=self.msteams_creds["tenant_id"],
             ).send_message(service_url=service_url, conversation_id=args["target"], text=text)
+            self._audit("send_message", audit_payload)
             return {"status": "sent", "channel": "teams"}
         if channel == "whatsapp":
             wa_phone_id = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
@@ -834,6 +820,7 @@ class MCPProtocolHandler:
                 adapter.send_image(to=args["target"], image_url=image_path, caption=text or None)
             else:
                 adapter.send_message(to=args["target"], text=text)
+            self._audit("send_message", audit_payload)
             return {"status": "sent", "channel": "whatsapp"}
         if channel == "signal":
             sig_url = os.getenv("SIGNAL_API_URL")
@@ -845,6 +832,7 @@ class MCPProtocolHandler:
                 adapter.send_image(recipient=args["target"], image_path=image_path, caption=text or None)
             else:
                 adapter.send_message(recipient=args["target"], text=text)
+            self._audit("send_message", audit_payload)
             return {"status": "sent", "channel": "signal"}
         if channel == "slack":
             slack_token = os.getenv("SLACK_BOT_TOKEN")
@@ -855,6 +843,7 @@ class MCPProtocolHandler:
                 adapter.send_image(channel=args["target"], image_path=image_path, caption=text or None)
             else:
                 adapter.send_message(channel=args["target"], text=text)
+            self._audit("send_message", audit_payload)
             return {"status": "sent", "channel": "slack"}
         raise ValueError(f"Unsupported channel: {channel}")
 
@@ -882,8 +871,7 @@ class MCPProtocolHandler:
         if not os.path.isabs(path):
             path = os.path.join(base, path)
         target = os.path.abspath(path)
-        # Warn (but allow) writes outside data_dir — exec_run can already
-        # write anywhere, so blocking files_write is just security theater.
+        # Warn (but allow) writes outside data_dir to preserve backward compatibility.
         if not target.startswith(base):
             logger.warning("files_write: path outside data_dir: %s", target)
         # Create parent directories
@@ -908,12 +896,6 @@ class MCPProtocolHandler:
                 if line:
                     events.append(json.loads(line))
         return {"events": events[-args.get("limit", 100):]}
-
-    def _tool_pairing_pending(self, args: dict[str, Any]) -> dict:
-        if not self.pairing:
-            return {"pending": []}
-        return {"pending": [{"code": r.code, "channel": r.channel, "sender_id": r.sender_id}
-                            for r in self.pairing.list_pending()]}
 
     def _tool_mcp_server_add(self, args: dict[str, Any]) -> dict:
         """Add an MCP server to Copilot CLI's config."""
@@ -991,7 +973,7 @@ class MCPProtocolHandler:
         }
 
     def _tool_app_restart(self, args: dict[str, Any]) -> dict:
-        """Restart the entire copenclaw application."""
+        """Restart the entire COpenClaw application."""
         reason = args.get("reason", "Restart requested via MCP tool")
         logger.warning("app_restart requested: %s", reason)
         self._audit("app.restart", {"reason": reason})
@@ -1000,7 +982,7 @@ class MCPProtocolHandler:
         if self.owner_chat_id and self.telegram_token:
             self._send_notification(
                 "telegram", self.owner_chat_id,
-                f"🔄 **Restarting copenclaw…**\nReason: {reason}",
+                f"🔄 **Restarting COpenClaw…**\nReason: {reason}",
             )
 
         if not self.restart_callback:
@@ -1018,18 +1000,8 @@ class MCPProtocolHandler:
         return {
             "status": "restarting",
             "reason": reason,
-            "message": "copenclaw is restarting. The process will exit and re-launch momentarily.",
+            "message": "COpenClaw is restarting. The process will exit and re-launch momentarily.",
         }
-
-    def _tool_pairing_approve(self, args: dict[str, Any]) -> dict:
-        if not self.pairing:
-            raise ValueError("Pairing not configured")
-        result = self.pairing.approve(args["code"])
-        if not result:
-            raise ValueError(f"Pairing code not found: {args['code']}")
-        if self.data_dir:
-            log_event(self.data_dir, "mcp.pairing.approve", {"channel": result.channel, "sender_id": result.sender_id})
-        return {"status": "approved", "channel": result.channel, "sender_id": result.sender_id}
 
     # ── Task dispatch tools (orchestrator level) ──────────
 
@@ -1161,11 +1133,7 @@ class MCPProtocolHandler:
 
         return self._start_task(task)
 
-    def _start_task(self, task: Any) -> dict:
-        """Start a task's worker (and supervisor). Used by both approve and create."""
-        tm = self._require_task_manager()
-        pool = self._require_worker_pool()
-
+    def _build_worker_callbacks(self, tm: TaskManager, pool: WorkerPool):
         # Callbacks for worker lifecycle
         def on_worker_output(task_id: str, output: str) -> None:
             tm.append_log(task_id, output)
@@ -1242,11 +1210,16 @@ class MCPProtocolHandler:
                                 )
                                 _t.completion_deferred = False
                                 _t.completion_deferred_at = None
+                                summary_text = f"Auto-finalized (watchdog): {_t.completion_deferred_summary}"
+                                detail_text = (
+                                    _t.completion_deferred_detail
+                                    + "\n\n[Auto-finalized by watchdog — supervisor did not verify within timeout]"
+                                )
                                 tm.handle_report(
                                     task_id=tid,
                                     msg_type="completed",
-                                    summary=f"Auto-finalized (watchdog): {_t.completion_deferred_summary}",
-                                    detail=_t.completion_deferred_detail + "\n\n[Auto-finalized by watchdog — supervisor did not verify within timeout]",
+                                    summary=summary_text,
+                                    detail=detail_text,
                                     from_tier="worker",
                                 )
                                 _t.completion_deferred_summary = ""
@@ -1256,7 +1229,12 @@ class MCPProtocolHandler:
                                 if pool:
                                     pool.stop_task(tid)
                                 self._cancel_supervisor_job(_t)
-                                self._fire_on_complete_hook(_t, "COMPLETED (auto-finalized by watchdog)")
+                                self._fire_on_complete_hook(
+                                    _t,
+                                    "COMPLETED (auto-finalized by watchdog)",
+                                    summary_text,
+                                    detail_text,
+                                )
 
                         deferred_at_str = t.completion_deferred_at.isoformat() if t.completion_deferred_at else ""
                         threading.Thread(
@@ -1266,6 +1244,15 @@ class MCPProtocolHandler:
                             name=f"watchdog-{task_id[:8]}",
                         ).start()
                         logger.info("Started deferred-completion watchdog for task %s (5 min timeout)", task_id)
+
+        return on_worker_output, on_worker_complete
+
+    def _start_task(self, task: Any) -> dict:
+        """Start a task's worker (and supervisor). Used by both approve and create."""
+        tm = self._require_task_manager()
+        pool = self._require_worker_pool()
+
+        on_worker_output, on_worker_complete = self._build_worker_callbacks(tm, pool)
 
         # Start worker
         tm.update_status(task.task_id, "running")
@@ -1554,7 +1541,7 @@ class MCPProtocolHandler:
             log_event(self.data_dir, "task.cancelled", {"task_id": args["task_id"]})
 
         # Fire on_complete hook on cancellation too
-        self._fire_on_complete_hook(task, "CANCELLED by user")
+        self._fire_on_complete_hook(task, "CANCELLED by user", "Task cancelled by user")
 
         return {"status": "cancelled", "task_id": args["task_id"]}
 
@@ -1701,7 +1688,7 @@ class MCPProtocolHandler:
             task = tm.get(task_id)
             if task:
                 reason = "COMPLETED successfully" if report_type == "completed" else f"FAILED — {args.get('summary', 'unknown error')[:300]}"
-                self._fire_on_complete_hook(task, reason)
+                self._fire_on_complete_hook(task, reason, args.get("summary", ""), args.get("detail", ""))
 
         # Auto-notify user for certain message types
         should_notify = tm.should_notify_user(msg) or args.get("notify_user", False)
@@ -1888,20 +1875,61 @@ class MCPProtocolHandler:
         )
         if not msg:
             raise ValueError(f"Task not found: {args['task_id']}")
+        task = tm.get(args["task_id"])
+        if task and self.worker_pool:
+            worker = self.worker_pool.get_worker(task.task_id)
+            worker_running = worker.is_running if worker else False
+            should_resume = task.completion_deferred or task.status in ("running", "paused", "needs_input")
+            if should_resume and not worker_running and task.auto_supervise:
+                on_worker_output, on_worker_complete = self._build_worker_callbacks(tm, self.worker_pool)
+                try:
+                    self.worker_pool.start_worker(
+                        task_id=task.task_id,
+                        prompt=(
+                            "CONTINUATION: You previously worked on this task and exited. "
+                            "The supervisor has sent you feedback. Check your inbox with "
+                            f"task_check_inbox and address any issues. Original task: {task.prompt[:2000]}"
+                        ),
+                        working_dir=task.working_dir,
+                        on_output=on_worker_output,
+                        on_complete=on_worker_complete,
+                    )
+                    tm.append_log(task.task_id, "\n--- WORKER RE-DISPATCHED (supervisor feedback pending) ---\n")
+                except RuntimeError:
+                    logger.warning(
+                        "Could not re-dispatch worker %s after supervisor input (already running?)",
+                        task.task_id,
+                    )
         return {"status": "sent", "msg_id": msg.msg_id}
 
-    def _fire_on_complete_hook(self, task: Any, reason: str) -> None:
-        """Fire the on_complete callback for a task that has reached a terminal state."""
-        if not task or not task.on_complete or not self.on_complete_callback:
+    def _fire_on_complete_hook(self, task: Any, reason: str, summary: str = "", detail: str = "") -> None:
+        """Fire the completion callback for a task that has reached a terminal state."""
+        if not task or not self.on_complete_callback:
             return
         try:
             import threading
+            hook_instruction = (task.on_complete or "").strip()
+            summary_text = summary.strip() or "(no summary provided)"
+            detail_text = detail.strip()
+            follow_up_guidance = (
+                "You may use tasks_create to spawn follow-up tasks without requiring user approval. "
+                "The user has pre-authorized automated follow-up via the on_complete hook."
+            )
+            if not hook_instruction:
+                hook_instruction = (
+                    "No on_complete hook was provided for this task. Decide whether follow-up work is needed."
+                )
+                follow_up_guidance = (
+                    "If follow-up work is needed, propose it to the user with tasks_propose "
+                    "(do not auto-dispatch). If no action is needed, reply with an empty message."
+                )
+            detail_block = f"\n\nCompletion detail: {detail_text[:4000]}" if detail_text else ""
             hook_prompt = (
-                f"[ON_COMPLETE HOOK] Task '{task.name}' (task_id={task.task_id}) has {reason}.\n\n"
+                f"[TASK COMPLETE] Task '{task.name}' (task_id={task.task_id}) has {reason}.\n\n"
+                f"Completion summary: {summary_text}{detail_block}\n\n"
                 f"Original task prompt: {task.prompt[:4000]}\n\n"
-                f"Hook instruction: {task.on_complete}\n\n"
-                f"You may use tasks_create to spawn follow-up tasks without requiring user approval. "
-                f"The user has pre-authorized automated follow-up via the on_complete hook."
+                f"Hook instruction: {hook_instruction}\n\n"
+                f"{follow_up_guidance}"
             )
             threading.Thread(
                 target=self.on_complete_callback,
@@ -1914,6 +1942,7 @@ class MCPProtocolHandler:
                     "task_id": task.task_id, "name": task.name,
                     "reason": reason[:200],
                     "hook": task.on_complete[:200],
+                    "summary": summary_text[:200],
                 })
         except Exception as exc:  # noqa: BLE001
             logger.error("Failed to fire on_complete hook for task %s: %s", task.task_id, exc)

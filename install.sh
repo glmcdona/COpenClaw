@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────────────────
-#  copenclaw installer for Linux / macOS
+#  COpenClaw installer for Linux / macOS
 #
 #  Checks prerequisites, installs GitHub Copilot CLI, sets up a Python venv,
 #  runs the interactive channel configurator, and optionally configures
@@ -27,18 +27,45 @@ warn()  { echo -e "  ${C_YELLOW}[!!]${C_RESET} $1"; }
 err()   { echo -e "  ${C_RED}[ERR]${C_RESET} $1"; }
 info()  { echo "  $1"; }
 
-# ── Resolve project root ─────────────────────────────────────────────────
+# ── Resolve project root (with bootstrap clone) ──────────────────────────
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -f "$SCRIPT_DIR/pyproject.toml" ]; then
     PROJECT_DIR="$SCRIPT_DIR"
-else
+elif [ -f "$(dirname "$SCRIPT_DIR")/pyproject.toml" ]; then
     PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-fi
+elif [ -f "./pyproject.toml" ]; then
+    PROJECT_DIR="$(pwd)"
+else
+    # Not inside a repo — clone to default location
+    INSTALL_DIR="$HOME/.copenclaw-src"
 
-if [ ! -f "$PROJECT_DIR/pyproject.toml" ]; then
-    err "Cannot find pyproject.toml.  Run this script from the copenclaw repo root."
-    exit 1
+    if ! command -v git &>/dev/null; then
+        err "git is required but not found on PATH."
+        echo "  Install git:"
+        if [ "$(uname -s)" = "Darwin" ]; then
+            echo "    brew install git"
+        else
+            echo "    sudo apt install git  (Debian/Ubuntu)"
+            echo "    sudo dnf install git  (Fedora)"
+        fi
+        exit 1
+    fi
+
+    if [ -f "$INSTALL_DIR/pyproject.toml" ]; then
+        info "Found existing install at $INSTALL_DIR, updating..."
+        cd "$INSTALL_DIR" && git pull || warn "git pull failed, continuing with existing code..."
+    else
+        info "Cloning COpenClaw to $INSTALL_DIR..."
+        git clone https://github.com/glmcdona/copenclaw.git "$INSTALL_DIR"
+        if [ $? -ne 0 ]; then
+            err "git clone failed. Check your internet connection and try again."
+            exit 1
+        fi
+    fi
+
+    PROJECT_DIR="$INSTALL_DIR"
+    ok "Repository ready at $PROJECT_DIR"
 fi
 
 cd "$PROJECT_DIR"
@@ -47,7 +74,7 @@ cd "$PROJECT_DIR"
 
 echo ""
 echo -e "${C_CYAN}==================================================${C_RESET}"
-echo -e "${C_CYAN}  copenclaw 🦀 Installer  ($(uname -s))${C_RESET}"
+echo -e "${C_CYAN}  COpenClaw 🦀 Installer  ($(uname -s))${C_RESET}"
 echo -e "${C_CYAN}==================================================${C_RESET}"
 echo ""
 
@@ -58,14 +85,14 @@ cat <<'DISCLAIMER'
 
                             WARNING  SECURITY WARNING  WARNING
 
-  copenclaw grants an AI agent FULL ACCESS to your computer.
+  COpenClaw grants an AI agent FULL ACCESS to your computer.
   By proceeding, you acknowledge and accept the following risks:
 
   • REMOTE CONTROL: Anyone who can message your connected chat channels (Telegram, WhatsApp,
     Signal, Teams, Slack) can execute arbitrary commands on your machine.
 
   • ACCOUNT TAKEOVER = DEVICE TAKEOVER: If an attacker compromises any of your linked chat
-    accounts, they gain full remote control of this computer through copenclaw.
+    accounts, they gain full remote control of this computer through COpenClaw.
 
   • AI MISTAKES: The AI agent can and will make errors. It may delete files, wipe data, corrupt
     configurations, or execute destructive commands — even without malicious intent.
@@ -80,7 +107,7 @@ cat <<'DISCLAIMER'
     platforms accessible from this machine, the agent (or an attacker via the agent) could make
     unauthorized transactions, transfers, or purchases on your behalf.
 
-  RECOMMENDATION: Run copenclaw inside a Docker container or virtual machine to limit the blast
+  RECOMMENDATION: Run COpenClaw inside a Docker container or virtual machine to limit the blast
   radius of any incident. Never run on a machine with access to sensitive financial accounts or
   irreplaceable data without appropriate isolation.
 
@@ -226,7 +253,7 @@ if ! $COPILOT_FOUND; then
                 ok "GitHub Copilot CLI installed"
                 COPILOT_FOUND=true
             else
-                warn "Skipping Copilot CLI install.  copenclaw requires it to function."
+                warn "Skipping Copilot CLI install.  COpenClaw requires it to function."
                 echo "  Install later: brew install copilot-cli"
             fi
         else
@@ -244,7 +271,7 @@ if ! $COPILOT_FOUND; then
                 ok "GitHub Copilot CLI installed"
                 COPILOT_FOUND=true
             else
-                warn "Skipping Copilot CLI install.  copenclaw requires it to function."
+                warn "Skipping Copilot CLI install.  COpenClaw requires it to function."
                 echo "  Install later: brew install copilot-cli"
             fi
         else
@@ -329,9 +356,9 @@ info "Activating .venv..."
 # shellcheck disable=SC1091
 source .venv/bin/activate
 
-info "Installing copenclaw and dependencies..."
+info "Installing COpenClaw and dependencies..."
 pip install -e . --quiet
-ok "copenclaw installed in .venv"
+ok "COpenClaw installed in .venv"
 
 # ── Step 4: Interactive configuration ─────────────────────────────────────
 
@@ -352,7 +379,7 @@ if [ "$SKIP_AUTOSTART" = "true" ]; then
     info "Skipped (SKIP_AUTOSTART=true)."
 else
     echo ""
-    read -rp "  Set copenclaw to start automatically on login? (y/N): " want_autostart
+    read -rp "  Set COpenClaw to start automatically on login? (y/N): " want_autostart
     if [[ "$want_autostart" =~ ^[Yy] ]]; then
         VENV_PYTHON="$PROJECT_DIR/.venv/bin/python"
 
@@ -408,7 +435,7 @@ PLIST
 
             cat > "$SERVICE_FILE" <<UNIT
 [Unit]
-Description=copenclaw - Remote Copilot CLI gateway
+Description=COpenClaw - Remote Copilot CLI gateway
 After=network-online.target
 Wants=network-online.target
 
@@ -437,7 +464,7 @@ UNIT
             fi
         fi
     else
-        info "Skipped autostart.  Start manually with: copenclaw serve"
+        info "Skipped autostart.  Start manually with: COpenClaw serve"
     fi
 fi
 
@@ -463,10 +490,10 @@ kill "$SERVER_PID" 2>/dev/null || true
 wait "$SERVER_PID" 2>/dev/null || true
 
 if $HEALTH_PASSED; then
-    ok "Health check passed — copenclaw is working!"
+    ok "Health check passed — COpenClaw is working!"
 else
     warn "Health check inconclusive.  This is normal if Copilot CLI is not yet authenticated."
-    info "Start manually to verify: copenclaw serve"
+    info "Start manually to verify: COpenClaw serve"
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────
@@ -476,7 +503,7 @@ echo -e "${C_GREEN}==================================================${C_RESET}"
 echo -e "${C_GREEN}  Installation complete!${C_RESET}"
 echo -e "${C_GREEN}==================================================${C_RESET}"
 echo ""
-echo "  Start copenclaw:              copenclaw serve"
+echo "  Start COpenClaw:              copenclaw serve"
 echo "  Reconfigure:                  python3 scripts/configure.py"
 echo "  Reconfigure channels only:    python3 scripts/configure.py --reconfigure"
 echo ""

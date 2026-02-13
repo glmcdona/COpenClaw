@@ -5,7 +5,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# Resolve the copenclaw project directory (where pyproject.toml lives)
+# Resolve the COpenClaw project directory (where pyproject.toml lives)
 # The script lives at copenclaw/scripts/start-windows.ps1
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectDir = Split-Path -Parent $ScriptDir
@@ -33,7 +33,7 @@ try {
   Write-Host "Installing deps..."
   pip install -e .
 
-  Write-Host "Starting copenclaw..."
+  Write-Host "Starting COpenClaw..."
   copenclaw serve --host $BindHost --port $Port
 } finally {
   Pop-Location

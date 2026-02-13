@@ -170,6 +170,11 @@ class Task:
     # Recovery tracking — tasks that were in-progress when the app restarted
     recovery_pending: bool = False
 
+    # Watchdog tracking — used for auto-recovery of stuck workers
+    watchdog_state: str = "none"  # none | warned | restarted | needs_input
+    watchdog_last_action_at: Optional[datetime] = None
+    watchdog_restart_count: int = 0
+
     def to_dict(self) -> dict:
         return {
             "task_id": self.task_id,
@@ -206,6 +211,9 @@ class Task:
             "last_worker_activity_at": self.last_worker_activity_at.isoformat() if self.last_worker_activity_at else None,
             "worker_exited_at": self.worker_exited_at.isoformat() if self.worker_exited_at else None,
             "recovery_pending": self.recovery_pending,
+            "watchdog_state": self.watchdog_state,
+            "watchdog_last_action_at": self.watchdog_last_action_at.isoformat() if self.watchdog_last_action_at else None,
+            "watchdog_restart_count": self.watchdog_restart_count,
         }
 
     @classmethod
@@ -245,6 +253,9 @@ class Task:
             last_worker_activity_at=datetime.fromisoformat(d["last_worker_activity_at"]) if d.get("last_worker_activity_at") else None,
             worker_exited_at=datetime.fromisoformat(d["worker_exited_at"]) if d.get("worker_exited_at") else None,
             recovery_pending=d.get("recovery_pending", False),
+            watchdog_state=d.get("watchdog_state", "none"),
+            watchdog_last_action_at=datetime.fromisoformat(d["watchdog_last_action_at"]) if d.get("watchdog_last_action_at") else None,
+            watchdog_restart_count=d.get("watchdog_restart_count", 0),
         )
 
     def add_timeline(self, event: str, summary: str, detail: str = "") -> TimelineEntry:
