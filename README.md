@@ -53,6 +53,65 @@ Run `copenclaw update` or send `/update` in chat to check for upstream changes a
 
 ---
 
+## Installation
+
+### One-liner install (recommended)
+
+No need to clone the repo first — the installer does it for you:
+
+**Windows** (open Command Prompt):
+```cmd
+curl -o install.bat https://raw.githubusercontent.com/glmcdona/copenclaw/main/install.bat && install.bat
+```
+
+**Linux / macOS** (open a terminal):
+```bash
+curl -fsSL https://raw.githubusercontent.com/glmcdona/copenclaw/main/install.sh -o install.sh && chmod +x install.sh && ./install.sh
+```
+
+The installer clones the repo to `~/.copenclaw-src` (or `%USERPROFILE%\.copenclaw-src` on Windows) and installs in **editable mode** — so the AI can modify the source directly and push improvements as PRs.
+
+### Manual install
+
+```bash
+git clone https://github.com/glmcdona/copenclaw.git
+cd copenclaw
+# Windows:
+install.bat
+# Linux / macOS:
+chmod +x install.sh && ./install.sh
+```
+
+### What the installer does
+
+1. **Check prerequisites** — Python ≥ 3.10, pip, git
+2. **Install GitHub Copilot CLI** — via `winget` (Windows) or `brew` (macOS/Linux), and walk you through auth (`/login`) and model selection (`/model`)
+3. **Set up a virtual environment** and install all dependencies (editable mode)
+4. **Configure your workspace** — create `~/.copenclaw/` and link in folders you want the bot to access
+5. **Detect installed chat apps** — scan for Telegram, WhatsApp, Signal, Teams, Slack
+6. **Walk you through channel setup** — prompt for API credentials for each platform
+7. **Optionally set up autostart** — Windows Scheduled Task, systemd service (Linux), or LaunchAgent (macOS)
+8. **Verify the installation** — quick health check
+
+Re-running the installer will `git pull` to update, then offer to **repair** (rebuild venv) or **reconfigure** (re-run channel setup).
+
+### Updating
+
+From the CLI:
+```bash
+copenclaw update          # Check for updates + prompt to apply
+copenclaw update --apply  # Apply without prompting
+```
+
+From chat:
+```
+/update          # Check for available updates
+/update apply    # Pull + reinstall
+/restart         # Restart to load new code
+```
+
+---
+
 ## COpenClaw vs OpenClaw
 
 | | **COpenClaw** | **OpenClaw** |
@@ -165,19 +224,15 @@ When COpenClaw boots, it creates a **workspace directory** (default: `~/.copencl
 
 ### Security Model
 
-COpenClaw defaults to a **paranoid-by-default** security posture with a deliberately minimal attack surface:
+COpenClaw defaults to a minimal, allowlist-first posture:
 
-| Layer | Default | Description |
-|---|---|---|
-| **No web UI** | By design | No dashboard, no frontend, no public-facing web server to misconfigure. Chat connectors are the only interface. |
-| **Allowlist mode** | `allowlist` (default) | Only user IDs in `*_ALLOW_FROM` env vars + the owner can interact. Unknown senders see their ID and setup instructions. |
-| **Owner auto-auth** | ✅ | The `TELEGRAM_OWNER_CHAT_ID` is automatically authorized on first contact — no manual setup needed for the owner. |
-| **Open mode** | Opt-in only | Processes messages from anyone. Requires deliberate configuration. **Dangerous.** |
-| **Execution policy** | Denylist | `/exec` commands default to allow-all with a denylist (`COPILOT_CLAW_DENIED_COMMANDS=shutdown,reboot,format`). Set `COPILOT_CLAW_ALLOW_ALL_COMMANDS=false` to switch to explicit allowlist mode. |
-| **Localhost-only MCP** | ✅ | The MCP endpoint binds to `127.0.0.1` by default — not reachable from the network. |
-| **Rate limiting** | ✅ | Per-channel webhook rate limiting prevents abuse. |
-| **Audit log** | ✅ | Every action (messages, execs, jobs, tasks) is logged to `audit.jsonl` with request IDs. |
-| **Risk acceptance** | Required | Both installer and app require you to type `I AGREE` before proceeding. Use `--accept-risks` for headless deployments. |
+- **No web UI** — chat connectors only.
+- **Allowlist by default** — only IDs in `*_ALLOW_FROM` plus the owner can interact; the owner auto-authorizes on first contact.
+- **Open mode is opt-in** — dangerous, use only if you mean it.
+- **Localhost-only MCP** — binds to `127.0.0.1` by default.
+- **Execution policy** — denylist by default; set `COPILOT_CLAW_ALLOW_ALL_COMMANDS=false` for explicit allowlist mode.
+- **Audit log** — every action recorded in `audit.jsonl`.
+- **Risk acceptance required** — you must type `I AGREE` (or use `--accept-risks`).
 
 **YOU USE THIS SOFTWARE ENTIRELY AT YOUR OWN RISK.**
 
@@ -267,75 +322,19 @@ With intermediate states: `paused`, `needs_input`, `recovery_pending`
 
 ---
 
-## Installation
-
-### One-liner install (recommended)
-
-No need to clone the repo first — the installer does it for you:
-
-**Windows** (open Command Prompt):
-```cmd
-curl -o install.bat https://raw.githubusercontent.com/glmcdona/copenclaw/main/install.bat && install.bat
-```
-
-**Linux / macOS** (open a terminal):
-```bash
-curl -fsSL https://raw.githubusercontent.com/glmcdona/copenclaw/main/install.sh -o install.sh && chmod +x install.sh && ./install.sh
-```
-
-The installer clones the repo to `~/.copenclaw-src` (or `%USERPROFILE%\.copenclaw-src` on Windows) and installs in **editable mode** — so the AI can modify the source directly and push improvements as PRs.
-
-### Manual install
-
-```bash
-git clone https://github.com/glmcdona/copenclaw.git
-cd copenclaw
-# Windows:
-install.bat
-# Linux / macOS:
-chmod +x install.sh && ./install.sh
-```
-
-### What the installer does
-
-1. **Check prerequisites** — Python ≥ 3.10, pip, git
-2. **Install GitHub Copilot CLI** — via `winget` (Windows) or `brew` (macOS/Linux), and walk you through auth (`/login`) and model selection (`/model`)
-3. **Set up a virtual environment** and install all dependencies (editable mode)
-4. **Configure your workspace** — create `~/.copenclaw/` and link in folders you want the bot to access
-5. **Detect installed chat apps** — scan for Telegram, WhatsApp, Signal, Teams, Slack
-6. **Walk you through channel setup** — prompt for API credentials for each platform
-7. **Optionally set up autostart** — Windows Scheduled Task, systemd service (Linux), or LaunchAgent (macOS)
-8. **Verify the installation** — quick health check
-
-Re-running the installer will `git pull` to update, then offer to **repair** (rebuild venv) or **reconfigure** (re-run channel setup).
-
-### Updating
-
-From the CLI:
-```bash
-copenclaw update          # Check for updates + prompt to apply
-copenclaw update --apply  # Apply without prompting
-```
-
-From chat:
-```
-/update          # Check for available updates
-/update apply    # Pull + reinstall
-/restart         # Restart to load new code
-```
-
----
-
 ## Quick start
 
-```bash
-cd copenclaw
-cp .env.example .env          # edit with your tokens
-pip install -e ".[dev]"
-copenclaw serve             # starts on 127.0.0.1:18790
-```
+1. Run the installer from the **Installation** section above.
+2. When prompted, pick a chat channel (Telegram, Slack, Teams, WhatsApp, Signal) and paste the token or credentials. The installer will walk you through pairing by asking you to send a message and will update `.env` for you.
+3. Start COpenClaw:
+   ```bash
+   copenclaw serve
+   ```
+   If you enabled autostart, it's already running.
 
-### Set up Telegram (easiest channel)
+### Manual channel setup (optional): Telegram
+
+If you skipped the installer prompts or want to reconfigure later, use `python scripts/configure.py` or follow the steps below.
 
 Telegram is the simplest channel — it works via **long-polling** so no public URL or webhook is needed. Your bot runs entirely behind your firewall.
 
