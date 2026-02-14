@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 import sys
 from typing import Optional
 
@@ -101,6 +102,99 @@ def update(
 
     if result.success:
         typer.echo("\nRestart COpenClaw to load the new code.")
+
+
+@app.command("teams-setup")
+def teams_setup(
+    tenant_id: str = typer.Option(..., envvar="MSTEAMS_ADMIN_TENANT_ID", help="Azure AD tenant ID"),
+    admin_client_id: str = typer.Option(..., envvar="MSTEAMS_ADMIN_CLIENT_ID", help="Admin app client ID"),
+    admin_client_secret: str = typer.Option(..., envvar="MSTEAMS_ADMIN_CLIENT_SECRET", help="Admin app client secret"),
+    subscription_id: str = typer.Option(..., envvar="MSTEAMS_AZURE_SUBSCRIPTION_ID", help="Azure subscription ID"),
+    resource_group: str = typer.Option(..., envvar="MSTEAMS_AZURE_RESOURCE_GROUP", help="Azure resource group name"),
+    resource_group_location: str = typer.Option(
+        "eastus",
+        envvar="MSTEAMS_AZURE_LOCATION",
+        help="Azure resource group location",
+    ),
+    bot_name: str = typer.Option(
+        "copenclaw-teams-bot",
+        envvar="MSTEAMS_BOT_NAME",
+        help="Bot display name",
+    ),
+    messaging_endpoint: str = typer.Option(
+        ...,
+        envvar="MSTEAMS_BOT_ENDPOINT",
+        help="Public HTTPS endpoint (https://<host>/teams/api/messages)",
+    ),
+    package_dir: str = typer.Option(
+        ".",
+        envvar="MSTEAMS_APP_PACKAGE_DIR",
+        help="Directory for generated Teams app package",
+    ),
+    publish: bool = typer.Option(
+        False,
+        "--publish/--no-publish",
+        envvar="MSTEAMS_AUTO_PUBLISH",
+        help="Publish the Teams app package to the tenant app catalog",
+    ),
+    create_resource_group: bool = typer.Option(
+        True,
+        "--create-resource-group/--no-create-resource-group",
+        envvar="MSTEAMS_AUTO_CREATE_RG",
+        help="Create the resource group if missing",
+    ),
+    write_env: Optional[str] = typer.Option(
+        None,
+        "--write-env",
+        envvar="MSTEAMS_WRITE_ENV",
+        help="Write MSTEAMS_* credentials to this .env file",
+    ),
+) -> None:
+    """Provision a Teams bot + app registration and generate a Teams app package."""
+    _load_env()
+    _setup_logging()
+
+    from copenclaw.integrations.teams_provision import (
+        TeamsProvisioningConfig,
+        provision_teams_bot,
+        update_env_file,
+    )
+
+    config = TeamsProvisioningConfig(
+        tenant_id=tenant_id,
+        admin_client_id=admin_client_id,
+        admin_client_secret=admin_client_secret,
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        resource_group_location=resource_group_location,
+        bot_name=bot_name,
+        messaging_endpoint=messaging_endpoint,
+        package_dir=Path(package_dir).expanduser().resolve(),
+        create_resource_group=create_resource_group,
+        publish=publish,
+    )
+
+    result = provision_teams_bot(config)
+
+    typer.echo("✅ Teams bot provisioned.")
+    typer.echo(f"   MSTEAMS_APP_ID={result.app_id}")
+    typer.echo(f"   MSTEAMS_APP_PASSWORD={result.app_password}")
+    typer.echo(f"   MSTEAMS_TENANT_ID={result.tenant_id}")
+    typer.echo(f"   Teams app package: {result.app_package_path}")
+    if result.teams_channel_enabled:
+        typer.echo("   Teams channel: enabled")
+    else:
+        typer.echo(f"   Teams channel: failed ({result.teams_channel_error})")
+    if result.published:
+        typer.echo("   Teams app: published to tenant catalog")
+
+    if write_env:
+        update_env_file(Path(write_env).expanduser(), {
+            "MSTEAMS_APP_ID": result.app_id,
+            "MSTEAMS_APP_PASSWORD": result.app_password,
+            "MSTEAMS_TENANT_ID": result.tenant_id,
+        })
+        typer.echo(f"   Updated {write_env}")
 
 if __name__ == "__main__":
     app()

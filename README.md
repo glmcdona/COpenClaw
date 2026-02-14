@@ -395,6 +395,18 @@ The user is then permanently authorized.
 
 Teams requires an Azure Bot registration (free tier available) and a public HTTPS endpoint. Local-only Teams app integrations (deep links/protocol handlers) do **not** support inbound bot messages.
 
+**Optional: auto-provision everything (admin required)**
+
+If you have tenant admin + Azure subscription privileges, COpenClaw can create the app registration, bot resource, Teams channel, and a Teams app package for you:
+
+```bash
+copenclaw teams-setup \
+  --messaging-endpoint https://<your-public-host>/teams/api/messages \
+  --write-env .env
+```
+
+Provide admin credentials via env vars (or flags): `MSTEAMS_ADMIN_TENANT_ID`, `MSTEAMS_ADMIN_CLIENT_ID`, `MSTEAMS_ADMIN_CLIENT_SECRET`, `MSTEAMS_AZURE_SUBSCRIPTION_ID`, `MSTEAMS_AZURE_RESOURCE_GROUP`. The command generates a Teams app package `.zip` and prints the bot credentials. Upload the package in the Teams admin center (or pass `--publish` to auto-publish if allowed).
+
 1. Go to [Azure Portal](https://portal.azure.com/) → **Bot Services** → **Create**
 2. Note your **App ID**, **App Password**, and **Tenant ID**
 3. Set the messaging endpoint to: `https://<your-public-host>/teams/api/messages` (use ngrok or Tailscale Funnel for local dev)

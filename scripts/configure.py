@@ -612,6 +612,8 @@ def configure_channels(selected: List[Channel], env_values: Dict[str, str]) -> D
             print("  Teams currently requires an Azure Bot registration (cloud) + public HTTPS endpoint.")
             print("  Local-only deep links/protocol handlers are not supported for bot inbound messages.")
             print("  Set messaging endpoint: https://<your-host>/teams/api/messages\n")
+            print("  Optional auto-provision: run 'copenclaw teams-setup' with admin credentials to")
+            print("  create the app registration + bot + Teams app package automatically.\n")
         elif ch.key == "slack":
             print("  Create a Slack App: https://api.slack.com/apps")
             print("  Required scopes: chat:write, files:write, channels:history, im:history")
