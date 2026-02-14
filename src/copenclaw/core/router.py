@@ -199,6 +199,8 @@ def handle_chat(
                 on_repair(desc, req)
                 return ChatResponse(text="🛠️ Repair started. Running diagnostics now...")
             return ChatResponse(text="Repair not available — no repair handler configured.")
+        if not on_repair:
+            return ChatResponse(text="Repair not available — no repair handler configured.")
         set_pending_repair(data_dir, req.channel, req.chat_id, req.sender_id)
         return ChatResponse(text="🛠️ Repair requested. Please describe the issue you are seeing.")
 
@@ -241,7 +243,7 @@ def handle_chat(
         return _cmd_cancel(task_manager, scheduler, target_id, on_task_cancelled)
 
     pending_repair = get_pending_repair(data_dir, req.channel, req.chat_id)
-    if pending_repair and not text.startswith("/"):
+    if pending_repair and not text.startswith("/") and pending_repair.get("sender_id") == req.sender_id:
         clear_pending_repair(data_dir, req.channel, req.chat_id)
         if on_repair:
             on_repair(text, req)
