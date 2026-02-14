@@ -121,6 +121,35 @@ def _recent_log_lines(log_dir: str, limit: int = 4) -> list[str]:
     activity_lines = _tail_lines(activity_log, max_lines=200)
     return activity_lines[-limit:]
 
+def _format_age(ts: datetime | None) -> str:
+    if not ts:
+        return "unknown"
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    delta = datetime.now(timezone.utc) - ts
+    seconds = max(0, int(delta.total_seconds()))
+    if seconds < 60:
+        return f"{seconds}s ago"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m ago"
+    hours = minutes // 60
+    if hours < 48:
+        return f"{hours}h ago"
+    days = hours // 24
+    return f"{days}d ago"
+
+def _recent_log_summary(log_dir: str) -> tuple[int, str, str]:
+    main_log = os.path.join(log_dir, "copenclaw.log")
+    main_lines = _tail_lines(main_log, max_lines=400)
+    errors = [line for line in main_lines if " ERROR" in line or "CRITICAL" in line]
+    error_count = len(errors)
+    last_error = errors[-1] if errors else ""
+    activity_log = os.path.join(log_dir, "activity.log")
+    activity_lines = _tail_lines(activity_log, max_lines=60)
+    last_activity = activity_lines[-1] if activity_lines else ""
+    return error_count, last_error, last_activity
+
 
 def _build_boot_message(
     settings: Settings,
@@ -132,9 +161,10 @@ def _build_boot_message(
     """Build an informative boot notification message."""
     lines = [
         "🦀 COpenClaw Command Console",
-        "────────────────────────────",
+        "════════════════════════════",
         "📡 System status",
     ]
+    lines.append("• Overall: ✅ online")
 
     # Brain session
     brain_state = "ready" if (cli._initialized or cli.session_id) else "starting"
@@ -175,7 +205,7 @@ def _build_boot_message(
         pass
 
     # MCP server
-    lines.append(f"• MCP: `{mcp_server_url}`")
+    lines.append(f"• MCP: ✅ `{mcp_server_url}`")
 
     # Task status summary
     all_tasks = task_manager.list_tasks()
@@ -193,7 +223,7 @@ def _build_boot_message(
             parts.append(f"{completed} completed")
         if failed:
             parts.append(f"{failed} failed")
-        lines.append(f"• Tasks: {', '.join(parts)}")
+        lines.append(f"• Tasks: {' | '.join(parts)}")
     else:
         lines.append("• Tasks: none")
 
@@ -216,6 +246,21 @@ def _build_boot_message(
     else:
         lines.append("• README.md: not found")
 
+    last_action = None
+    last_action_label = ""
+    if all_tasks:
+        latest_task = max(all_tasks, key=lambda t: t.updated_at)
+        last_action = latest_task.updated_at
+        last_action_label = f"{latest_task.name} ({latest_task.task_id})"
+    activity_log = os.path.join(settings.log_dir, "activity.log")
+    if os.path.isfile(activity_log):
+        activity_ts = datetime.fromtimestamp(os.path.getmtime(activity_log), tz=timezone.utc)
+        if not last_action or activity_ts > last_action:
+            last_action = activity_ts
+            last_action_label = "activity log"
+    if last_action:
+        lines.append(f"• Last activity: {_format_age(last_action)} ({last_action_label})")
+
     # Timeout info
     timeout_min = settings.copilot_cli_timeout // 60
     lines.append(f"• CLI timeout: {timeout_min}min")
@@ -231,6 +276,18 @@ def _build_boot_message(
             if main_ref and git_info["branch"] not in ("main", "master") and py_lines > 0:
                 branch_line += f" ({py_lines} lines changed in .py files vs {main_ref})"
             lines.append(f"• {branch_line}")
+
+    lines.extend(["", "🔌 Connections"])
+    connections = [
+        ("Telegram", bool(settings.telegram_bot_token)),
+        ("Teams", bool(settings.msteams_app_id and settings.msteams_app_password)),
+        ("WhatsApp", bool(settings.whatsapp_phone_number_id and settings.whatsapp_access_token)),
+        ("Signal", bool(settings.signal_api_url and settings.signal_phone_number)),
+        ("Slack", bool(settings.slack_bot_token and settings.slack_signing_secret)),
+    ]
+    for name, enabled in connections:
+        state = "✅ configured" if enabled else "⏸️ disabled"
+        lines.append(f"• {name}: {state}")
 
     lines.extend(["", "📋 Tasks (active/proposed)"])
     status_emoji = {
@@ -263,6 +320,12 @@ def _build_boot_message(
             lines.append(f"... (+{len(visible_tasks) - max_items} more)")
 
     lines.extend(["", "🧾 Recent errors / logs"])
+    error_count, last_error, last_activity = _recent_log_summary(settings.log_dir)
+    lines.append(f"• Errors in last 400 lines: {error_count}")
+    if last_activity:
+        lines.append(f"• Latest activity: {_compact(last_activity, limit=160)}")
+    if last_error:
+        lines.append(f"• Latest error: {_compact(last_error, limit=160)}")
     recent_lines = _recent_log_lines(settings.log_dir, limit=4)
     if not recent_lines:
         lines.append("• No recent errors.")
@@ -272,9 +335,10 @@ def _build_boot_message(
 
     lines.extend([
         "",
-        "💬 Quick commands",
-        "• /help  • /status  • /tasks  • /logs <id>",
-        "• Or send any request to the brain to begin.",
+        "⌨️ Command input",
+        "• Type a command or request below to reach the brain:",
+        "> <your request here>",
+        "• Slash commands: /help  /status  /tasks  /logs <id>",
     ])
 
     return "\n".join(lines)
@@ -1589,15 +1653,21 @@ def create_app() -> FastAPI:
             resolved = command
             if not os.path.isabs(resolved):
                 resolved = shutil.which(resolved) or resolved
-            if resolved.lower().endswith(".py"):
-                exec_args = [sys.executable, resolved] + argv[1:]
-                logger.info("Re-executing process: %s %s", sys.executable, exec_args[1:])
-                os.execv(sys.executable, exec_args)
-            exec_args = [resolved] + argv[1:]
-            logger.info("Re-executing process: %s %s", resolved, exec_args[1:])
-            os.execvp(resolved, exec_args)
-        logger.info("Re-executing process: %s %s", sys.executable, sys.argv)
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+            resolved_path = os.path.abspath(resolved) if resolved else ""
+            if resolved_path and not os.path.exists(resolved_path):
+                resolved = ""
+            if resolved:
+                if resolved.lower().endswith(".py"):
+                    exec_args = [sys.executable, resolved] + argv[1:]
+                    logger.info("Re-executing process: %s %s", sys.executable, exec_args[1:])
+                    os.execv(sys.executable, exec_args)
+                exec_args = [resolved] + argv[1:]
+                logger.info("Re-executing process: %s %s", resolved, exec_args[1:])
+                os.execvp(resolved, exec_args)
+
+        module_args = ["-m", "copenclaw.cli"] + (argv[1:] or ["serve"])
+        logger.info("Re-executing process: %s %s", sys.executable, module_args)
+        os.execv(sys.executable, [sys.executable] + module_args)
 
     mcp_handler.restart_callback = _restart_app
 

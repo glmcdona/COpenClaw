@@ -113,6 +113,74 @@ def handle_chat(
             info = check_for_updates()
             if info is None:
                 return ChatResponse(text="✅ COpenClaw is already up to date.")
+
+            if info.has_conflicts:
+                if not task_manager or not worker_pool:
+                    return ChatResponse(
+                        text=(
+                            "⚠️ Update conflicts detected, but the auto-merge worker is not available. "
+                            "Resolve the conflicts manually or run `copenclaw update --apply` from the CLI."
+                        )
+                    )
+
+                prompt = (
+                    "Update COpenClaw to the latest origin default branch and resolve any merge conflicts. "
+                    "Work inside the COpenClaw source repo (use the OwnCode link in the workspace if helpful). "
+                    "Steps: check git status, git fetch origin, pull/rebase from the default branch, "
+                    "resolve conflicts carefully, then run `pip install -e .` to reinstall. "
+                    "Report progress and completion with task_report, and summarize what you changed."
+                )
+
+                task = task_manager.create_task(
+                    name="Auto-merge update conflicts",
+                    prompt=prompt,
+                    channel=req.channel,
+                    target=req.chat_id,
+                    service_url=req.service_url or "",
+                    auto_supervise=False,
+                    status="pending",
+                )
+
+                def on_worker_output(task_id: str, output: str) -> None:
+                    task_manager.append_log(task_id, output)
+
+                def on_worker_complete(task_id: str, output: str) -> None:
+                    task_manager.append_log(task_id, f"\n--- WORKER FINISHED ---\n{output}")
+                    task = task_manager.get(task_id)
+                    if task and task.status not in ("completed", "failed", "cancelled"):
+                        if output.startswith("ERROR:") or output.startswith("UNEXPECTED ERROR:"):
+                            task_manager.handle_report(
+                                task_id,
+                                "failed",
+                                "Auto-merge worker failed",
+                                detail=output,
+                                from_tier="worker",
+                            )
+                        else:
+                            task_manager.handle_report(
+                                task_id,
+                                "progress",
+                                "Auto-merge worker session ended",
+                                detail=output,
+                                from_tier="worker",
+                            )
+
+                task_manager.update_status(task.task_id, "running")
+                worker_pool.start_worker(
+                    task_id=task.task_id,
+                    prompt=task.prompt,
+                    working_dir=task.working_dir,
+                    on_output=on_worker_output,
+                    on_complete=on_worker_complete,
+                )
+
+                return ChatResponse(
+                    text=(
+                        "⚠️ Update conflicts detected. I am starting an auto-merge task now. "
+                        f"Task ID: {task.task_id}. Use `/task {task.task_id}` or `/logs {task.task_id}` to track it."
+                    )
+                )
+
             result = apply_update()
             return ChatResponse(text=format_update_result(result))
         else:

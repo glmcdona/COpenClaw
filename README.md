@@ -330,7 +330,7 @@ With intermediate states: `paused`, `needs_input`, `recovery_pending`
    copenclaw serve
    ```
    If you enabled autostart, it's already running.
-   On boot, COpenClaw sends a command console snapshot to your owner chat with system status, tasks, and recent logs.
+   On boot, COpenClaw sends a command console snapshot to your owner chat with system status, tasks, recent logs, and a command input hint.
 
 ### Manual channel setup (optional): Telegram
 
