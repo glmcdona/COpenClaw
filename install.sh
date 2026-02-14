@@ -371,6 +371,44 @@ python3 scripts/configure.py
 # Record disclaimer acceptance so the app doesn't re-prompt
 python3 -c "from copenclaw.core.disclaimer import record_acceptance; record_acceptance()"
 
+# Optional: auto-provision Microsoft Teams bot if admin credentials are available
+if [ -f ".env" ]; then
+    # shellcheck disable=SC1091
+    set -a
+    source .env
+    set +a
+fi
+
+AUTO_TEAMS_SETUP="${MSTEAMS_AUTO_SETUP:-}"
+case "$AUTO_TEAMS_SETUP" in
+    0|false|FALSE|False|no|NO|No)
+        AUTO_TEAMS_SETUP="false"
+        ;;
+    *)
+        AUTO_TEAMS_SETUP="true"
+        ;;
+esac
+
+if [ "$AUTO_TEAMS_SETUP" = "true" ]; then
+    if [ -n "${MSTEAMS_ADMIN_TENANT_ID:-}" ] \
+        && [ -n "${MSTEAMS_ADMIN_CLIENT_ID:-}" ] \
+        && [ -n "${MSTEAMS_ADMIN_CLIENT_SECRET:-}" ] \
+        && [ -n "${MSTEAMS_AZURE_SUBSCRIPTION_ID:-}" ] \
+        && [ -n "${MSTEAMS_AZURE_RESOURCE_GROUP:-}" ] \
+        && [ -n "${MSTEAMS_BOT_ENDPOINT:-}" ]; then
+        if [ -z "${MSTEAMS_APP_ID:-}" ] || [ -z "${MSTEAMS_APP_PASSWORD:-}" ] || [ -z "${MSTEAMS_TENANT_ID:-}" ]; then
+            info "Auto-provisioning Microsoft Teams bot..."
+            if $VENV_PYTHON -m copenclaw.cli teams-setup \
+                --messaging-endpoint "$MSTEAMS_BOT_ENDPOINT" \
+                --write-env ".env"; then
+                ok "Teams auto-provisioning complete."
+            else
+                warn "Teams auto-provisioning failed. Run 'copenclaw teams-setup' manually."
+            fi
+        fi
+    fi
+fi
+
 # ── Step 5: Autostart ─────────────────────────────────────────────────────
 
 step "5/6" "Autostart configuration..."

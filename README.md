@@ -407,6 +407,8 @@ copenclaw teams-setup \
 
 Provide admin credentials via env vars (or flags): `MSTEAMS_ADMIN_TENANT_ID`, `MSTEAMS_ADMIN_CLIENT_ID`, `MSTEAMS_ADMIN_CLIENT_SECRET`, `MSTEAMS_AZURE_SUBSCRIPTION_ID`, `MSTEAMS_AZURE_RESOURCE_GROUP`. The command generates a Teams app package `.zip` and prints the bot credentials. Upload the package in the Teams admin center (or pass `--publish` to auto-publish if allowed).
 
+If you set these env vars during install and keep `MSTEAMS_AUTO_SETUP` unset/true, the installer will auto-run `teams-setup` and write the bot credentials into `.env` for you.
+
 1. Go to [Azure Portal](https://portal.azure.com/) → **Bot Services** → **Create**
 2. Note your **App ID**, **App Password**, and **Tenant ID**
 3. Set the messaging endpoint to: `https://<your-public-host>/teams/api/messages` (use ngrok or Tailscale Funnel for local dev)

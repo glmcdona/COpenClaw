@@ -638,6 +638,44 @@ def configure_channels(selected: List[Channel], env_values: Dict[str, str]) -> D
             env_values[var_name] = val
             print()
 
+        if ch.key == "teams":
+            existing_auto = env_values.get("MSTEAMS_AUTO_SETUP", "")
+            auto_default = existing_auto.lower() in {"1", "true", "yes"}
+            if prompt_yn("  Auto-provision Teams bot now? (requires admin credentials)", default=auto_default):
+                env_values["MSTEAMS_AUTO_SETUP"] = "true"
+                extra_vars = [
+                    ("MSTEAMS_ADMIN_TENANT_ID", "Azure AD tenant ID (admin)", "", ""),
+                    ("MSTEAMS_ADMIN_CLIENT_ID", "Admin app client ID", "", ""),
+                    ("MSTEAMS_ADMIN_CLIENT_SECRET", "Admin app client secret", "", ""),
+                    ("MSTEAMS_AZURE_SUBSCRIPTION_ID", "Azure subscription ID", "", ""),
+                    ("MSTEAMS_AZURE_RESOURCE_GROUP", "Azure resource group name", "", ""),
+                    ("MSTEAMS_AZURE_LOCATION", "Azure resource group location", "", "eastus"),
+                    ("MSTEAMS_BOT_NAME", "Bot display name", "", "copenclaw-teams-bot"),
+                    ("MSTEAMS_BOT_ENDPOINT", "Messaging endpoint", "https://<your-host>/teams/api/messages", ""),
+                    ("MSTEAMS_APP_PACKAGE_DIR", "Teams app package output directory", "", ""),
+                    ("MSTEAMS_AUTO_PUBLISH", "Auto-publish Teams app to catalog (true/false)", "", "false"),
+                    ("MSTEAMS_AUTO_CREATE_RG", "Auto-create resource group (true/false)", "", "true"),
+                ]
+                for var_name, description, hint, default in extra_vars:
+                    current = env_values.get(var_name, "")
+                    if current:
+                        display_current = f" {dim(f'(current: {current})')}"
+                    else:
+                        display_current = ""
+                    hint_str = f" {dim(hint)}" if hint else ""
+                    label = f"  {description}{hint_str}{display_current}"
+                    print(label)
+                    default_val = current or default
+                    if default_val:
+                        val = prompt(f"  {var_name}", default_val)
+                    else:
+                        val = prompt(f"  {var_name}")
+                    env_values[var_name] = val
+                    print()
+            else:
+                env_values["MSTEAMS_AUTO_SETUP"] = "false"
+                print()
+
         # --- Interactive pairing after credential entry ---
 
         if ch.key == "telegram":
