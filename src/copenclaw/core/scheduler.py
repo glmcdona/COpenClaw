@@ -21,6 +21,14 @@ class ScheduledJob:
     cron_expr: Optional[str] = None  # If set, job recurs on this cron schedule
 
 class Scheduler:
+    @staticmethod
+    def _normalize_datetimes(left: datetime, right: datetime) -> tuple[datetime, datetime]:
+        if left.tzinfo is not None and right.tzinfo is None:
+            left = left.replace(tzinfo=None)
+        elif left.tzinfo is None and right.tzinfo is not None:
+            right = right.replace(tzinfo=None)
+        return left, right
+
     def __init__(self, store_path: Optional[str] = None, run_log_path: Optional[str] = None) -> None:
         self._jobs: Dict[str, ScheduledJob] = {}
         self._store_path = store_path
@@ -148,25 +156,26 @@ class Scheduler:
             if job.cancelled or job.completed_at is not None:
                 continue
             # Normalize timezone awareness for comparison
-            run_at = job.run_at
-            cmp_now = now
-            if run_at.tzinfo is not None and cmp_now.tzinfo is None:
-                run_at = run_at.replace(tzinfo=None)
-            elif run_at.tzinfo is None and cmp_now.tzinfo is not None:
-                cmp_now = cmp_now.replace(tzinfo=None)
+            run_at, cmp_now = self._normalize_datetimes(job.run_at, now)
             if run_at <= cmp_now:
                 result.append(job)
         return result
 
-    def mark_completed(self, job_id: str) -> None:
+    def mark_completed(self, job_id: str, now: Optional[datetime] = None) -> None:
         job = self._jobs.get(job_id)
         if not job:
             return
+        now = now or datetime.utcnow()
         if job.cron_expr:
             # Recurring: advance run_at to next occurrence instead of completing
             try:
                 cron = croniter(job.cron_expr, job.run_at)
-                job.run_at = cron.get_next(datetime)
+                next_run = cron.get_next(datetime)
+                cmp_next, cmp_now = self._normalize_datetimes(next_run, now)
+                while cmp_next <= cmp_now:
+                    next_run = cron.get_next(datetime)
+                    cmp_next, cmp_now = self._normalize_datetimes(next_run, now)
+                job.run_at = next_run
                 # Don't set completed_at so it fires again
             except (ValueError, KeyError):
                 job.completed_at = datetime.utcnow()

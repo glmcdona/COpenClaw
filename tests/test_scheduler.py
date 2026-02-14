@@ -50,6 +50,16 @@ def test_cron_recurring() -> None:
     assert updated.completed_at is None
     assert updated.run_at > past
 
+def test_cron_advances_to_future_run() -> None:
+    sched = Scheduler()
+    now = datetime.utcnow()
+    past = now - timedelta(hours=2)
+    job = sched.schedule("cron-skip", past, {"prompt": "x", "channel": "telegram", "target": "1"}, cron_expr="*/5 * * * *")
+    sched.mark_completed(job.job_id, now=now)
+    updated = sched.get(job.job_id)
+    assert updated.completed_at is None
+    assert updated.run_at > now
+
 def test_validate_payload_ok() -> None:
     errors = Scheduler.validate_payload({"prompt": "hello", "channel": "telegram", "target": "123"})
     assert errors == []
