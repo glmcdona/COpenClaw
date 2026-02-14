@@ -13,6 +13,7 @@ from typing import Optional
 
 from copenclaw.core.logging_config import (
     append_to_file,
+    get_copilot_boot_failure_log_path,
     get_activity_log_path,
     get_orchestrator_log_path,
 )
@@ -330,6 +331,11 @@ class CopilotCli:
 
         if result.returncode != 0:
             error_text = stderr or output
+            if error_text:
+                append_to_file(
+                    get_copilot_boot_failure_log_path(),
+                    f"[{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}] {error_text}"
+                )
             if allow_retry and not self._subcommand and self._should_retry_with_chat(error_text):
                 logger.warning("copilot CLI rejected args; retrying with 'chat' subcommand")
                 self._subcommand = "chat"

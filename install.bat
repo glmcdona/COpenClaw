@@ -10,10 +10,15 @@ setlocal enabledelayedexpansion
 ::  Usage:
 ::    install.bat              Normal install
 ::    install.bat --no-auto    Skip autostart setup
+::    install.bat --repair     Run self-repair after install
 :: ──────────────────────────────────────────────────────────────────────────
 
 set "SKIP_AUTOSTART=0"
-if "%~1"=="--no-auto" set "SKIP_AUTOSTART=1"
+set "RUN_REPAIR=0"
+for %%A in (%*) do (
+    if /I "%%~A"=="--no-auto" set "SKIP_AUTOSTART=1"
+    if /I "%%~A"=="--repair" set "RUN_REPAIR=1"
+)
 
 :: ── Banner ───────────────────────────────────────────────────────────────
 
@@ -483,6 +488,11 @@ echo   Start COpenClaw:   copenclaw serve
 echo   Reconfigure:       python scripts\configure.py
 echo   Reconfigure channels only:  python scripts\configure.py --reconfigure
 echo.
+
+if "%RUN_REPAIR%"=="1" (
+    echo   Running self-repair...
+    "!VENV_PYTHON!" -m copenclaw.cli repair
+)
 
 :done
 popd 2>nul

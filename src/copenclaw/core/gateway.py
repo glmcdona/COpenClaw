@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import glob
 import logging
-from typing import Optional
+from typing import Any, Optional
 import os
 import shutil
 import subprocess
@@ -161,16 +161,8 @@ def _build_boot_message(
     """Build an informative boot notification message."""
     lines = [
         "🦀 COpenClaw Command Console",
-        "════════════════════════════",
-        "📡 System status",
+        "════════════════════",
     ]
-    lines.append("• Overall: ✅ online")
-
-    # Brain session
-    brain_state = "ready" if (cli._initialized or cli.session_id) else "starting"
-    if cli.session_id:
-        brain_state += f" (`{cli.session_id}`)"
-    lines.append(f"• Brain: {brain_state}")
 
     # System info
     hostname = socket.gethostname()
@@ -181,51 +173,20 @@ def _build_boot_message(
     workspace = settings.workspace_dir or os.getcwd()
     abs_workspace = os.path.abspath(workspace)
     lines.append(f"• Workspace: `{abs_workspace}`")
-    lines.append(f"• Data: `{settings.data_dir}`")
-    lines.append(f"• Logs: `{settings.log_dir}`")
     try:
         if os.path.isdir(workspace):
-            entries = sorted(os.listdir(workspace))
-            dirs = [e + "/" for e in entries if os.path.isdir(os.path.join(workspace, e)) and not e.startswith(".")]
-            files = [e for e in entries if os.path.isfile(os.path.join(workspace, e)) and not e.startswith(".")]
-            summary_parts: list[str] = []
-            if dirs:
-                dir_list = ", ".join(dirs[:6])
-                if len(dirs) > 6:
-                    dir_list += f" ... (+{len(dirs) - 6} more)"
-                summary_parts.append(f"Dirs: {dir_list}")
-            if files:
-                file_list = ", ".join(files[:5])
-                if len(files) > 5:
-                    file_list += f" ... (+{len(files) - 5} more)"
-                summary_parts.append(f"Files: {file_list}")
-            if summary_parts:
-                lines.append(f"• Workspace items: {_compact(' | '.join(summary_parts), limit=160)}")
+            entries = [e for e in sorted(os.listdir(workspace)) if not e.startswith(".")]
+            display: list[str] = []
+            for entry in entries[:10]:
+                suffix = "/" if os.path.isdir(os.path.join(workspace, entry)) else ""
+                display.append(f"{entry}{suffix}")
+            if display:
+                more = f" ... (+{len(entries) - 10} more)" if len(entries) > 10 else ""
+                lines.append(f"• Workspace items: {_compact(', '.join(display) + more, limit=160)}")
     except Exception:  # noqa: BLE001
         pass
 
-    # MCP server
-    lines.append(f"• MCP: ✅ `{mcp_server_url}`")
-
-    # Task status summary
     all_tasks = task_manager.list_tasks()
-    if all_tasks:
-        active = len([t for t in all_tasks if t.status in ("running", "paused", "needs_input", "pending")])
-        proposed = len([t for t in all_tasks if t.status == "proposed"])
-        completed = len([t for t in all_tasks if t.status == "completed"])
-        failed = len([t for t in all_tasks if t.status == "failed"])
-        parts = []
-        if active:
-            parts.append(f"{active} active")
-        if proposed:
-            parts.append(f"{proposed} proposed")
-        if completed:
-            parts.append(f"{completed} completed")
-        if failed:
-            parts.append(f"{failed} failed")
-        lines.append(f"• Tasks: {' | '.join(parts)}")
-    else:
-        lines.append("• Tasks: none")
 
     # Jobs
     jobs = scheduler.list()
@@ -246,25 +207,6 @@ def _build_boot_message(
     else:
         lines.append("• README.md: not found")
 
-    last_action = None
-    last_action_label = ""
-    if all_tasks:
-        latest_task = max(all_tasks, key=lambda t: t.updated_at)
-        last_action = latest_task.updated_at
-        last_action_label = f"{latest_task.name} ({latest_task.task_id})"
-    activity_log = os.path.join(settings.log_dir, "activity.log")
-    if os.path.isfile(activity_log):
-        activity_ts = datetime.fromtimestamp(os.path.getmtime(activity_log), tz=timezone.utc)
-        if not last_action or activity_ts > last_action:
-            last_action = activity_ts
-            last_action_label = "activity log"
-    if last_action:
-        lines.append(f"• Last activity: {_format_age(last_action)} ({last_action_label})")
-
-    # Timeout info
-    timeout_min = settings.copilot_cli_timeout // 60
-    lines.append(f"• CLI timeout: {timeout_min}min")
-
     # Git branch info
     repo_root = _resolve_repo_root()
     if repo_root and os.path.isdir(repo_root):
@@ -276,18 +218,6 @@ def _build_boot_message(
             if main_ref and git_info["branch"] not in ("main", "master") and py_lines > 0:
                 branch_line += f" ({py_lines} lines changed in .py files vs {main_ref})"
             lines.append(f"• {branch_line}")
-
-    lines.extend(["", "🔌 Connections"])
-    connections = [
-        ("Telegram", bool(settings.telegram_bot_token)),
-        ("Teams", bool(settings.msteams_app_id and settings.msteams_app_password)),
-        ("WhatsApp", bool(settings.whatsapp_phone_number_id and settings.whatsapp_access_token)),
-        ("Signal", bool(settings.signal_api_url and settings.signal_phone_number)),
-        ("Slack", bool(settings.slack_bot_token and settings.slack_signing_secret)),
-    ]
-    for name, enabled in connections:
-        state = "✅ configured" if enabled else "⏸️ disabled"
-        lines.append(f"• {name}: {state}")
 
     lines.extend(["", "📋 Tasks (active/proposed)"])
     status_emoji = {
@@ -319,26 +249,12 @@ def _build_boot_message(
         if len(visible_tasks) > max_items:
             lines.append(f"... (+{len(visible_tasks) - max_items} more)")
 
-    lines.extend(["", "🧾 Recent errors / logs"])
-    error_count, last_error, last_activity = _recent_log_summary(settings.log_dir)
-    lines.append(f"• Errors in last 400 lines: {error_count}")
-    if last_activity:
-        lines.append(f"• Latest activity: {_compact(last_activity, limit=160)}")
-    if last_error:
-        lines.append(f"• Latest error: {_compact(last_error, limit=160)}")
-    recent_lines = _recent_log_lines(settings.log_dir, limit=4)
-    if not recent_lines:
-        lines.append("• No recent errors.")
-    else:
-        for entry in recent_lines:
-            lines.append(f"• {_compact(entry, limit=160)}")
-
     lines.extend([
         "",
-        "⌨️ Command input",
-        "• Type a command or request below to reach the brain:",
-        "> <your request here>",
-        "• Slash commands: /help  /status  /tasks  /logs <id>",
+        "⌨️ Slash commands",
+        "• /status  • /whoami  • /help",
+        "• /tasks  • /jobs  • /exec <cmd>",
+        "• /update  • /update apply  • /repair  • /restart [reason]",
     ])
 
     return "\n".join(lines)
@@ -891,6 +807,59 @@ def create_app() -> FastAPI:
         """Called when the user declines a retry for a failed task."""
         mcp_handler.decline_retry(task_id)
 
+    def _send_repair_message(channel: str, target: str, text: str, service_url: str | None = None) -> None:
+        try:
+            if channel == "telegram" and settings.telegram_bot_token:
+                _telegram_adapter().send_message(chat_id=int(target), text=text)
+            elif channel in ("teams", "msteams") and settings.msteams_app_id:
+                if service_url:
+                    _teams_adapter().send_message(
+                        service_url=service_url,
+                        conversation_id=target,
+                        text=text,
+                    )
+            elif channel == "whatsapp" and settings.whatsapp_phone_number_id and settings.whatsapp_access_token:
+                WhatsAppAdapter(
+                    phone_number_id=settings.whatsapp_phone_number_id,
+                    access_token=settings.whatsapp_access_token,
+                    verify_token=settings.whatsapp_verify_token or "",
+                ).send_message(to=target, text=text)
+            elif channel == "signal" and settings.signal_api_url and settings.signal_phone_number:
+                SignalAdapter(
+                    api_url=settings.signal_api_url,
+                    phone_number=settings.signal_phone_number,
+                ).send_message(recipient=target, text=text)
+            elif channel == "slack" and settings.slack_bot_token:
+                SlackAdapter(
+                    bot_token=settings.slack_bot_token,
+                    signing_secret=settings.slack_signing_secret or "",
+                ).send_message(channel=target, text=text)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Repair notification failed (%s): %s", channel, exc)
+
+    def _on_repair(description: str, req: ChatRequest) -> None:
+        from copenclaw.core.repair import run_repair
+
+        def _notify(msg: str) -> None:
+            _send_repair_message(req.channel, req.chat_id, msg, req.service_url)
+
+        workspace_root = settings.workspace_dir or os.getcwd()
+        repo_root = _resolve_repo_root()
+
+        threading.Thread(
+            target=run_repair,
+            kwargs={
+                "description": description,
+                "workspace_root": workspace_root,
+                "repo_root": repo_root,
+                "log_dir": settings.log_dir,
+                "timeout": settings.copilot_cli_timeout,
+                "notify": _notify,
+            },
+            daemon=True,
+            name="repair-run",
+        ).start()
+
     def _handle_telegram_update(update: dict) -> None:
         """Process a single Telegram update from polling (same logic as webhook)."""
         if not isinstance(update, dict):
@@ -969,6 +938,7 @@ def create_app() -> FastAPI:
                 on_task_retry_approved=_on_task_retry_approved,
                 on_task_retry_rejected=_on_task_retry_rejected,
                 on_restart=_restart_app,
+                on_repair=_on_repair,
             )
         finally:
             typing_stop.set()
@@ -1164,6 +1134,7 @@ def create_app() -> FastAPI:
                 on_task_retry_approved=_on_task_retry_approved,
                 on_task_retry_rejected=_on_task_retry_rejected,
                 on_restart=_restart_app,
+                on_repair=_on_repair,
             )
         finally:
             typing_stop.set()
@@ -1234,6 +1205,7 @@ def create_app() -> FastAPI:
             on_task_retry_approved=_on_task_retry_approved,
             on_task_retry_rejected=_on_task_retry_rejected,
             on_restart=_restart_app,
+            on_repair=_on_repair,
         )
         _teams_adapter().send_message(
             service_url=service_url,
@@ -1320,6 +1292,7 @@ def create_app() -> FastAPI:
                 on_task_retry_approved=_on_task_retry_approved,
                 on_task_retry_rejected=_on_task_retry_rejected,
                 on_restart=_restart_app,
+                on_repair=_on_repair,
             )
             adapter.send_message(to=sender, text=resp.text)
 
@@ -1373,6 +1346,7 @@ def create_app() -> FastAPI:
             on_task_retry_approved=_on_task_retry_approved,
             on_task_retry_rejected=_on_task_retry_rejected,
             on_restart=_restart_app,
+            on_repair=_on_repair,
         )
         sig.send_message(recipient=sender, text=resp.text)
 
@@ -1448,6 +1422,7 @@ def create_app() -> FastAPI:
             on_task_retry_approved=_on_task_retry_approved,
             on_task_retry_rejected=_on_task_retry_rejected,
             on_restart=_restart_app,
+            on_repair=_on_repair,
         )
         _slack_adapter().send_message(channel=channel_id, text=resp.text)
         return {"status": resp.status}

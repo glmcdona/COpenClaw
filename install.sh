@@ -5,9 +5,22 @@
 #  Checks prerequisites, installs GitHub Copilot CLI, sets up a Python venv,
 #  runs the interactive channel configurator, and optionally configures
 #  autostart on boot (systemd on Linux, launchd on macOS).
+#
+#  Usage:
+#    ./install.sh             Normal install
+#    ./install.sh --repair    Run self-repair after install
 # ──────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
+
+RUN_REPAIR=false
+for arg in "$@"; do
+    case "$arg" in
+        --repair)
+            RUN_REPAIR=true
+            ;;
+    esac
+done
 
 # ── Colours ───────────────────────────────────────────────────────────────
 
@@ -533,6 +546,11 @@ if $HEALTH_PASSED; then
 else
     warn "Health check inconclusive.  This is normal if Copilot CLI is not yet authenticated."
     info "Start manually to verify: COpenClaw serve"
+fi
+
+if $RUN_REPAIR; then
+    info "Running self-repair..."
+    $VENV_PYTHON -m copenclaw.cli repair
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────
