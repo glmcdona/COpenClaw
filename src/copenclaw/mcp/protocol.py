@@ -799,10 +799,15 @@ class MCPProtocolHandler:
             return {"status": "sent", "channel": "telegram"}
         if channel == "teams":
             if not self.msteams_creds:
-                raise ValueError("Teams not configured")
+                raise ValueError(
+                    "Teams not configured. Set MSTEAMS_APP_ID, MSTEAMS_APP_PASSWORD, MSTEAMS_TENANT_ID."
+                )
             service_url = args.get("service_url") or self.msteams_creds.get("service_url")
             if not service_url:
-                raise ValueError("service_url required for Teams")
+                raise ValueError(
+                    "service_url required for Teams (from webhook payload). "
+                    "Pass service_url or send a Teams message to capture it."
+                )
             TeamsAdapter(
                 app_id=self.msteams_creds["app_id"],
                 app_password=self.msteams_creds["app_password"],
@@ -826,7 +831,10 @@ class MCPProtocolHandler:
             sig_url = os.getenv("SIGNAL_API_URL")
             sig_phone = os.getenv("SIGNAL_PHONE_NUMBER")
             if not sig_url or not sig_phone:
-                raise ValueError("Signal not configured")
+                raise ValueError(
+                    "Signal not configured. Set SIGNAL_API_URL and SIGNAL_PHONE_NUMBER, "
+                    "and ensure signal-cli-rest-api is running."
+                )
             adapter = SignalAdapter(api_url=sig_url, phone_number=sig_phone)
             if image_path:
                 adapter.send_image(recipient=args["target"], image_path=image_path, caption=text or None)

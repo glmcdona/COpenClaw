@@ -604,11 +604,13 @@ def configure_channels(selected: List[Channel], env_values: Dict[str, str]) -> D
             print("  Add the WhatsApp product and note your Phone Number ID")
             print("  Set webhook URL: https://<your-host>/whatsapp/webhook\n")
         elif ch.key == "signal":
-            print("  You need a running signal-cli-rest-api instance.")
+            print("  Signal uses signal-cli-rest-api (local-only; no public URL needed).")
             print("  Docs: https://github.com/bbernhard/signal-cli-rest-api")
-            print("  Docker: docker run -d -p 8080:8080 bbernhard/signal-cli-rest-api\n")
+            print("  Docker: docker run -d -p 8080:8080 bbernhard/signal-cli-rest-api")
+            print("  Tip: verify API with: curl http://localhost:8080/v1/about\n")
         elif ch.key == "teams":
-            print("  Register a Bot in Azure Portal.")
+            print("  Teams currently requires an Azure Bot registration (cloud) + public HTTPS endpoint.")
+            print("  Local-only deep links/protocol handlers are not supported for bot inbound messages.")
             print("  Set messaging endpoint: https://<your-host>/teams/api/messages\n")
         elif ch.key == "slack":
             print("  Create a Slack App: https://api.slack.com/apps")

@@ -393,11 +393,11 @@ The user is then permanently authorized.
 <details>
 <summary><strong>Microsoft Teams</strong></summary>
 
-Teams requires an Azure Bot registration (free tier available).
+Teams requires an Azure Bot registration (free tier available) and a public HTTPS endpoint. Local-only Teams app integrations (deep links/protocol handlers) do **not** support inbound bot messages.
 
 1. Go to [Azure Portal](https://portal.azure.com/) → **Bot Services** → **Create**
 2. Note your **App ID**, **App Password**, and **Tenant ID**
-3. Set the messaging endpoint to: `https://<your-public-host>/teams/api/messages`
+3. Set the messaging endpoint to: `https://<your-public-host>/teams/api/messages` (use ngrok or Tailscale Funnel for local dev)
 4. Add to `.env`:
    ```
    MSTEAMS_APP_ID=<App ID>
@@ -405,9 +405,8 @@ Teams requires an Azure Bot registration (free tier available).
    MSTEAMS_TENANT_ID=<Tenant ID>
    MSTEAMS_ALLOW_FROM=<comma-separated user IDs, or leave blank>
    ```
-5. Teams **requires a publicly accessible HTTPS endpoint** — use a reverse proxy, ngrok, or Tailscale Funnel
 
-> **Note:** Set `MSTEAMS_VALIDATE_TOKEN=true` (default) to verify Azure JWT tokens on incoming requests.
+> **Note:** Set `MSTEAMS_VALIDATE_TOKEN=false` for local testing if you cannot validate Azure JWT tokens.
 </details>
 
 <details>
@@ -435,7 +434,7 @@ Uses the [WhatsApp Business Cloud API](https://developers.facebook.com/docs/what
 <details>
 <summary><strong>Signal</strong></summary>
 
-Signal connects via [signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api), which wraps Signal's desktop protocol. No public URL needed — COpenClaw polls the REST API.
+Signal connects via [signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api), which wraps Signal's desktop protocol. Local-only; no public URL needed.
 
 1. Run signal-cli-rest-api:
    ```bash
@@ -451,8 +450,9 @@ Signal connects via [signal-cli-rest-api](https://github.com/bbernhard/signal-cl
    SIGNAL_ALLOW_FROM=+1234567890,+0987654321
    ```
    Phone numbers are in E.164 format (with `+`).
+4. Optional sanity check: `curl http://localhost:8080/v1/about`
 
-**Interactive setup:** `python scripts/configure.py` also supports Signal interactive setup — send a message to your Signal number and the script will detect the sender and offer to authorize them.
+**Interactive setup:** `python scripts/configure.py` supports Signal pairing — send a message to your Signal number and the script will detect the sender and offer to authorize them.
 </details>
 
 <details>

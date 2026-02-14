@@ -853,8 +853,18 @@ def create_app() -> FastAPI:
         # Start Signal polling if configured
         if settings.signal_api_url and settings.signal_phone_number:
             signal_adapter = _signal_adapter()
-            signal_adapter.start_polling(on_update=_handle_signal_message)
-            logger.info("Signal polling started")
+            if signal_adapter.check_connection():
+                signal_adapter.start_polling(on_update=_handle_signal_message)
+                logger.info("Signal polling started")
+            else:
+                logger.error(
+                    "Signal polling disabled: unable to reach signal-cli-rest-api at %s",
+                    settings.signal_api_url,
+                )
+        elif settings.signal_api_url or settings.signal_phone_number:
+            logger.warning(
+                "Signal configuration incomplete: set both SIGNAL_API_URL and SIGNAL_PHONE_NUMBER to enable Signal."
+            )
 
         # Bootstrap brain in a separate thread so it doesn't block server startup
         boot_thread = threading.Thread(target=_bootstrap_brain, daemon=True)
@@ -1025,7 +1035,10 @@ def create_app() -> FastAPI:
         if request.headers.get("content-length") and int(request.headers["content-length"]) > 200000:
             raise HTTPException(status_code=413, detail="payload too large")
         if not (settings.msteams_app_id and settings.msteams_app_password and settings.msteams_tenant_id):
-            raise HTTPException(status_code=400, detail="Teams not configured")
+            raise HTTPException(
+                status_code=400,
+                detail="Teams not configured. Set MSTEAMS_APP_ID, MSTEAMS_APP_PASSWORD, MSTEAMS_TENANT_ID.",
+            )
 
         activity = await request.json()
         auth_header = request.headers.get("Authorization")
