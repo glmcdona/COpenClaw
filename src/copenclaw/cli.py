@@ -104,6 +104,31 @@ def update(
         typer.echo("\nRestart COpenClaw to load the new code.")
 
 
+@app.command()
+def repair(
+    description: Optional[str] = typer.Option(None, "--description", "-d", help="Describe the issue"),
+) -> None:
+    """Run self-repair diagnostics and attempt automated fixes."""
+    _load_env()
+    _setup_logging()
+
+    from copenclaw.core.config import Settings
+    from copenclaw.core.repair import run_repair
+
+    settings = Settings.from_env()
+    workspace_root = settings.workspace_dir or os.getcwd()
+    desc = description or "Installer-triggered repair"
+
+    run_repair(
+        description=desc,
+        workspace_root=workspace_root,
+        repo_root=None,
+        log_dir=settings.log_dir,
+        timeout=settings.copilot_cli_timeout,
+        notify=lambda msg: typer.echo(msg),
+    )
+
+
 @app.command("teams-setup")
 def teams_setup(
     tenant_id: str = typer.Option(..., envvar="MSTEAMS_ADMIN_TENANT_ID", help="Azure AD tenant ID"),

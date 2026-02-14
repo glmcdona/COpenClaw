@@ -17,6 +17,7 @@ from copenclaw.core.audit import generate_request_id, log_event
 from copenclaw.core.logging_config import append_to_file, get_activity_log_path, get_orchestrator_log_path, log_command
 from copenclaw.core.pairing import PairingStore
 from copenclaw.core.policy import load_execution_policy, run_command
+from copenclaw.core.repair import clear_pending_repair, get_pending_repair, set_pending_repair
 from copenclaw.core.scheduler import Scheduler
 from copenclaw.core.session import SessionStore
 from copenclaw.core.tasks import TaskManager
@@ -63,6 +64,7 @@ def handle_chat(
     on_task_retry_approved: Optional[object] = None,  # callable(task_id) -> dict
     on_task_retry_rejected: Optional[object] = None,  # callable(task_id) -> None
     on_restart: Optional[object] = None,  # callable(reason: str) -> None
+    on_repair: Optional[object] = None,  # callable(description: str, req: ChatRequest) -> None
 ) -> ChatResponse:
     """Route a normalised chat request and return a response."""
     rid = req.request_id or generate_request_id()
@@ -187,6 +189,21 @@ def handle_chat(
             info = check_for_updates()
             return ChatResponse(text=format_update_check(info))
 
+    if text.startswith("/repair"):
+        if req.sender_id not in allow_from and not (owner_id and req.sender_id == owner_id):
+            return ChatResponse(text="Not authorized", status="denied")
+        log_event(data_dir, f"{req.channel}.repair.requested", {"sender_id": req.sender_id}, request_id=rid)
+        desc = text[len("/repair"):].strip()
+        if desc:
+            if on_repair:
+                on_repair(desc, req)
+                return ChatResponse(text="🛠️ Repair started. Running diagnostics now...")
+            return ChatResponse(text="Repair not available — no repair handler configured.")
+        if not on_repair:
+            return ChatResponse(text="Repair not available — no repair handler configured.")
+        set_pending_repair(data_dir, req.channel, req.chat_id, req.sender_id)
+        return ChatResponse(text="🛠️ Repair requested. Please describe the issue you are seeing.")
+
     if text.startswith("/exec "):
         if req.sender_id not in allow_from:
             return ChatResponse(text="Not authorized", status="denied")
@@ -224,6 +241,14 @@ def handle_chat(
     if text.startswith("/cancel "):
         target_id = text[len("/cancel "):].strip()
         return _cmd_cancel(task_manager, scheduler, target_id, on_task_cancelled)
+
+    pending_repair = get_pending_repair(data_dir, req.channel, req.chat_id)
+    if pending_repair and not text.startswith("/") and pending_repair.get("sender_id") == req.sender_id:
+        clear_pending_repair(data_dir, req.channel, req.chat_id)
+        if on_repair:
+            on_repair(text, req)
+            return ChatResponse(text="🛠️ Repair started. Running diagnostics now...")
+        return ChatResponse(text="Repair not available — no repair handler configured.")
 
     # --- quick ping-back scheduling ---
     ping_match = PING_BACK_RE.match(text)
@@ -430,6 +455,7 @@ def _cmd_help() -> ChatResponse:
         "`/exec <cmd>` — Run a shell command\n"
         "`/update` — Check for code updates\n"
         "`/update apply` — Apply available update\n"
+        "`/repair` — Run self-repair diagnostics\n"
         "`/restart [reason]` — Restart the app\n\n"
         "Anything else is sent to the AI brain as free text."
     )

@@ -260,6 +260,16 @@ def get_activity_log_path() -> str:
     return os.path.join(get_log_dir(), "activity.log")
 
 
+def get_repair_log_path() -> str:
+    """Return the path to the repair log file."""
+    return os.path.join(get_log_dir(), "repair.log")
+
+
+def get_copilot_boot_failure_log_path() -> str:
+    """Return the path to the last Copilot CLI boot failure output."""
+    return os.path.join(get_log_dir(), "copilot-boot-failure.log")
+
+
 def get_worker_log_dir(task_id: str) -> str:
     """Return the directory for per-task worker/supervisor logs."""
     d = os.path.join(get_log_dir(), "workers", task_id)

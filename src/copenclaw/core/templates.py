@@ -119,3 +119,7 @@ def supervisor_template(
         supervisor_instructions=supervisor_instructions,
         workspace_root=workspace_root,
     )
+
+def repair_template(**kwargs: str) -> str:
+    """Return rendered repair instructions for a repair run."""
+    return load_template("repair", **kwargs)
