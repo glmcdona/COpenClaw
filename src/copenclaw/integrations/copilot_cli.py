@@ -144,6 +144,13 @@ class CopilotCli:
         path = shutil.which(self.executable)
         if not path:
             raise CopilotCliError("copilot CLI not found on PATH")
+        if sys.platform == "win32":
+            suffix = Path(path).suffix.lower()
+            if suffix in {".bat", ".cmd", ".ps1"}:
+                exe_name = f"{Path(self.executable).stem}.exe"
+                exe_path = shutil.which(exe_name)
+                if exe_path:
+                    return exe_path
         return path
 
     def _ensure_mcp_config(self) -> str:

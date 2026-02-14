@@ -95,6 +95,61 @@ def _get_git_branch_info(repo_root: str) -> dict:
     except Exception:  # noqa: BLE001
         return {}
 
+def _compact(text: str, limit: int = 140) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+def _tail_lines(path: str, max_lines: int = 200) -> list[str]:
+    if not path or not os.path.isfile(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            lines = [line.strip() for line in handle.readlines() if line.strip()]
+        return lines[-max_lines:]
+    except Exception:  # noqa: BLE001
+        return []
+
+def _recent_log_lines(log_dir: str, limit: int = 4) -> list[str]:
+    """Return recent error lines (or fallback activity log lines)."""
+    main_log = os.path.join(log_dir, "copenclaw.log")
+    main_lines = _tail_lines(main_log, max_lines=400)
+    errors = [line for line in main_lines if " ERROR" in line or "CRITICAL" in line]
+    if errors:
+        return errors[-limit:]
+    activity_log = os.path.join(log_dir, "activity.log")
+    activity_lines = _tail_lines(activity_log, max_lines=200)
+    return activity_lines[-limit:]
+
+def _format_age(ts: datetime | None) -> str:
+    if not ts:
+        return "unknown"
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    delta = datetime.now(timezone.utc) - ts
+    seconds = max(0, int(delta.total_seconds()))
+    if seconds < 60:
+        return f"{seconds}s ago"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m ago"
+    hours = minutes // 60
+    if hours < 48:
+        return f"{hours}h ago"
+    days = hours // 24
+    return f"{days}d ago"
+
+def _recent_log_summary(log_dir: str) -> tuple[int, str, str]:
+    main_log = os.path.join(log_dir, "copenclaw.log")
+    main_lines = _tail_lines(main_log, max_lines=400)
+    errors = [line for line in main_lines if " ERROR" in line or "CRITICAL" in line]
+    error_count = len(errors)
+    last_error = errors[-1] if errors else ""
+    activity_log = os.path.join(log_dir, "activity.log")
+    activity_lines = _tail_lines(activity_log, max_lines=60)
+    last_activity = activity_lines[-1] if activity_lines else ""
+    return error_count, last_error, last_activity
+
 
 def _build_boot_message(
     settings: Settings,
@@ -104,42 +159,53 @@ def _build_boot_message(
     scheduler: Scheduler,
 ) -> str:
     """Build an informative boot notification message."""
-    lines = ["🦀 **COpenClaw** is online and awaiting commands!"]
+    lines = [
+        "🦀 COpenClaw Command Console",
+        "════════════════════════════",
+        "📡 System status",
+    ]
+    lines.append("• Overall: ✅ online")
 
     # Brain session
+    brain_state = "ready" if (cli._initialized or cli.session_id) else "starting"
     if cli.session_id:
-        lines.append(f"\n🧠 Brain session: `{cli.session_id}`")
+        brain_state += f" (`{cli.session_id}`)"
+    lines.append(f"• Brain: {brain_state}")
 
     # System info
     hostname = socket.gethostname()
     os_info = f"{platform.system()} {platform.release()}"
-    lines.append(f"\n🖥️ Host: **{hostname}** ({os_info})")
+    lines.append(f"• Host: {hostname} ({os_info})")
 
     # Working directory
     workspace = settings.workspace_dir or os.getcwd()
-    lines.append(f"📂 Workspace: `{os.path.abspath(workspace)}`")
-
-    # List top-level folders in workspace
+    abs_workspace = os.path.abspath(workspace)
+    lines.append(f"• Workspace: `{abs_workspace}`")
+    lines.append(f"• Data: `{settings.data_dir}`")
+    lines.append(f"• Logs: `{settings.log_dir}`")
     try:
         if os.path.isdir(workspace):
             entries = sorted(os.listdir(workspace))
             dirs = [e + "/" for e in entries if os.path.isdir(os.path.join(workspace, e)) and not e.startswith(".")]
             files = [e for e in entries if os.path.isfile(os.path.join(workspace, e)) and not e.startswith(".")]
+            summary_parts: list[str] = []
             if dirs:
-                dir_list = ", ".join(dirs[:15])
-                if len(dirs) > 15:
-                    dir_list += f" … (+{len(dirs) - 15} more)"
-                lines.append(f"   📁 Folders: {dir_list}")
+                dir_list = ", ".join(dirs[:6])
+                if len(dirs) > 6:
+                    dir_list += f" ... (+{len(dirs) - 6} more)"
+                summary_parts.append(f"Dirs: {dir_list}")
             if files:
-                file_list = ", ".join(files[:10])
-                if len(files) > 10:
-                    file_list += f" … (+{len(files) - 10} more)"
-                lines.append(f"   📄 Files: {file_list}")
+                file_list = ", ".join(files[:5])
+                if len(files) > 5:
+                    file_list += f" ... (+{len(files) - 5} more)"
+                summary_parts.append(f"Files: {file_list}")
+            if summary_parts:
+                lines.append(f"• Workspace items: {_compact(' | '.join(summary_parts), limit=160)}")
     except Exception:  # noqa: BLE001
         pass
 
     # MCP server
-    lines.append(f"🔌 MCP: `{mcp_server_url}`")
+    lines.append(f"• MCP: ✅ `{mcp_server_url}`")
 
     # Task status summary
     all_tasks = task_manager.list_tasks()
@@ -157,33 +223,47 @@ def _build_boot_message(
             parts.append(f"{completed} completed")
         if failed:
             parts.append(f"{failed} failed")
-        lines.append(f"📋 Tasks: {', '.join(parts)}")
+        lines.append(f"• Tasks: {' | '.join(parts)}")
     else:
-        lines.append("📋 Tasks: none")
+        lines.append("• Tasks: none")
 
     # Jobs
     jobs = scheduler.list()
     active_jobs = [j for j in jobs if j.completed_at is None and not j.cancelled]
     if active_jobs:
-        lines.append(f"⏰ Jobs: {len(active_jobs)} scheduled")
+        lines.append(f"• Jobs: {len(active_jobs)} scheduled")
     else:
-        lines.append("⏰ Jobs: none")
+        lines.append("• Jobs: none")
 
     # README.md status
-    workspace = settings.workspace_dir or os.getcwd()
     readme_path = os.path.join(workspace, "README.md")
     if os.path.isfile(readme_path):
         try:
             size = os.path.getsize(readme_path)
-            lines.append(f"📝 README.md: {size} bytes (project log loaded)")
+            lines.append(f"• README.md: {size} bytes (project log loaded)")
         except Exception:  # noqa: BLE001
-            lines.append("📝 README.md: present")
+            lines.append("• README.md: present")
     else:
-        lines.append("📝 README.md: not found")
+        lines.append("• README.md: not found")
+
+    last_action = None
+    last_action_label = ""
+    if all_tasks:
+        latest_task = max(all_tasks, key=lambda t: t.updated_at)
+        last_action = latest_task.updated_at
+        last_action_label = f"{latest_task.name} ({latest_task.task_id})"
+    activity_log = os.path.join(settings.log_dir, "activity.log")
+    if os.path.isfile(activity_log):
+        activity_ts = datetime.fromtimestamp(os.path.getmtime(activity_log), tz=timezone.utc)
+        if not last_action or activity_ts > last_action:
+            last_action = activity_ts
+            last_action_label = "activity log"
+    if last_action:
+        lines.append(f"• Last activity: {_format_age(last_action)} ({last_action_label})")
 
     # Timeout info
     timeout_min = settings.copilot_cli_timeout // 60
-    lines.append(f"⏱️ CLI timeout: {timeout_min}min")
+    lines.append(f"• CLI timeout: {timeout_min}min")
 
     # Git branch info
     repo_root = _resolve_repo_root()
@@ -195,7 +275,71 @@ def _build_boot_message(
             main_ref = git_info.get("main_ref", "")
             if main_ref and git_info["branch"] not in ("main", "master") and py_lines > 0:
                 branch_line += f" ({py_lines} lines changed in .py files vs {main_ref})"
-            lines.append(branch_line)
+            lines.append(f"• {branch_line}")
+
+    lines.extend(["", "🔌 Connections"])
+    connections = [
+        ("Telegram", bool(settings.telegram_bot_token)),
+        ("Teams", bool(settings.msteams_app_id and settings.msteams_app_password)),
+        ("WhatsApp", bool(settings.whatsapp_phone_number_id and settings.whatsapp_access_token)),
+        ("Signal", bool(settings.signal_api_url and settings.signal_phone_number)),
+        ("Slack", bool(settings.slack_bot_token and settings.slack_signing_secret)),
+    ]
+    for name, enabled in connections:
+        state = "✅ configured" if enabled else "⏸️ disabled"
+        lines.append(f"• {name}: {state}")
+
+    lines.extend(["", "📋 Tasks (active/proposed)"])
+    status_emoji = {
+        "proposed": "📋",
+        "pending": "⏳",
+        "running": "🔄",
+        "paused": "⏸️",
+        "needs_input": "❓",
+        "failed": "❌",
+        "completed": "✅",
+        "cancelled": "🚫",
+    }
+    visible_statuses = {"running", "paused", "needs_input", "pending", "proposed"}
+    visible_tasks = [t for t in all_tasks if t.status in visible_statuses]
+    if not visible_tasks:
+        lines.append("• No active or proposed tasks.")
+    else:
+        status_rank = {"needs_input": 0, "running": 1, "paused": 2, "pending": 3, "proposed": 4}
+        visible_tasks.sort(
+            key=lambda t: (status_rank.get(t.status, 9), -t.updated_at.timestamp())
+        )
+        max_items = 6
+        for task in visible_tasks[:max_items]:
+            emoji = status_emoji.get(task.status, "•")
+            latest = task.timeline[-1].summary if task.timeline else ""
+            latest = _compact(latest, limit=90)
+            suffix = f" — {latest}" if latest else ""
+            lines.append(f"{emoji} {task.name} (`{task.task_id}`) [{task.status}]{suffix}")
+        if len(visible_tasks) > max_items:
+            lines.append(f"... (+{len(visible_tasks) - max_items} more)")
+
+    lines.extend(["", "🧾 Recent errors / logs"])
+    error_count, last_error, last_activity = _recent_log_summary(settings.log_dir)
+    lines.append(f"• Errors in last 400 lines: {error_count}")
+    if last_activity:
+        lines.append(f"• Latest activity: {_compact(last_activity, limit=160)}")
+    if last_error:
+        lines.append(f"• Latest error: {_compact(last_error, limit=160)}")
+    recent_lines = _recent_log_lines(settings.log_dir, limit=4)
+    if not recent_lines:
+        lines.append("• No recent errors.")
+    else:
+        for entry in recent_lines:
+            lines.append(f"• {_compact(entry, limit=160)}")
+
+    lines.extend([
+        "",
+        "⌨️ Command input",
+        "• Type a command or request below to reach the brain:",
+        "> <your request here>",
+        "• Slash commands: /help  /status  /tasks  /logs <id>",
+    ])
 
     return "\n".join(lines)
 
@@ -853,8 +997,18 @@ def create_app() -> FastAPI:
         # Start Signal polling if configured
         if settings.signal_api_url and settings.signal_phone_number:
             signal_adapter = _signal_adapter()
-            signal_adapter.start_polling(on_update=_handle_signal_message)
-            logger.info("Signal polling started")
+            if signal_adapter.check_connection():
+                signal_adapter.start_polling(on_update=_handle_signal_message)
+                logger.info("Signal polling started")
+            else:
+                logger.error(
+                    "Signal polling disabled: unable to reach signal-cli-rest-api at %s",
+                    settings.signal_api_url,
+                )
+        elif settings.signal_api_url or settings.signal_phone_number:
+            logger.warning(
+                "Signal configuration incomplete: set both SIGNAL_API_URL and SIGNAL_PHONE_NUMBER to enable Signal."
+            )
 
         # Bootstrap brain in a separate thread so it doesn't block server startup
         boot_thread = threading.Thread(target=_bootstrap_brain, daemon=True)
@@ -1025,7 +1179,10 @@ def create_app() -> FastAPI:
         if request.headers.get("content-length") and int(request.headers["content-length"]) > 200000:
             raise HTTPException(status_code=413, detail="payload too large")
         if not (settings.msteams_app_id and settings.msteams_app_password and settings.msteams_tenant_id):
-            raise HTTPException(status_code=400, detail="Teams not configured")
+            raise HTTPException(
+                status_code=400,
+                detail="Teams not configured. Set MSTEAMS_APP_ID, MSTEAMS_APP_PASSWORD, MSTEAMS_TENANT_ID.",
+            )
 
         activity = await request.json()
         auth_header = request.headers.get("Authorization")
@@ -1489,9 +1646,29 @@ def create_app() -> FastAPI:
         if tg_adapter:
             tg_adapter.stop_polling()
 
-        # Re-exec the current process
-        logger.info("Re-executing process: %s %s", sys.executable, sys.argv)
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        # Re-exec the current process using the original entrypoint.
+        argv = sys.argv[:] if sys.argv else []
+        command = argv[0] if argv else ""
+        if command:
+            resolved = command
+            if not os.path.isabs(resolved):
+                resolved = shutil.which(resolved) or resolved
+            resolved_path = os.path.abspath(resolved) if resolved else ""
+            if resolved_path and not os.path.exists(resolved_path):
+                resolved = ""
+            if resolved:
+                if resolved.lower().endswith(".py"):
+                    exec_args = [sys.executable, resolved] + argv[1:]
+                    logger.info("Re-executing process: %s %s", sys.executable, exec_args[1:])
+                    os.execv(sys.executable, exec_args)
+                else:
+                    exec_args = [resolved] + argv[1:]
+                    logger.info("Re-executing process: %s %s", resolved, exec_args[1:])
+                    os.execvp(resolved, exec_args)
+
+        module_args = ["-m", "copenclaw.cli"] + (argv[1:] or ["serve"])
+        logger.info("Re-executing process: %s %s", sys.executable, module_args)
+        os.execv(sys.executable, [sys.executable] + module_args)
 
     mcp_handler.restart_callback = _restart_app
 

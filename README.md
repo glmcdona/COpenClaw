@@ -330,6 +330,7 @@ With intermediate states: `paused`, `needs_input`, `recovery_pending`
    copenclaw serve
    ```
    If you enabled autostart, it's already running.
+   On boot, COpenClaw sends a command console snapshot to your owner chat with system status, tasks, recent logs, and a command input hint.
 
 ### Manual channel setup (optional): Telegram
 
@@ -393,11 +394,25 @@ The user is then permanently authorized.
 <details>
 <summary><strong>Microsoft Teams</strong></summary>
 
-Teams requires an Azure Bot registration (free tier available).
+Teams requires an Azure Bot registration (free tier available) and a public HTTPS endpoint. Local-only Teams app integrations (deep links/protocol handlers) do **not** support inbound bot messages.
+
+**Optional: auto-provision everything (admin required)**
+
+If you have tenant admin + Azure subscription privileges, COpenClaw can create the app registration, bot resource, Teams channel, and a Teams app package for you:
+
+```bash
+copenclaw teams-setup \
+  --messaging-endpoint https://<your-public-host>/teams/api/messages \
+  --write-env .env
+```
+
+Provide admin credentials via env vars (or flags): `MSTEAMS_ADMIN_TENANT_ID`, `MSTEAMS_ADMIN_CLIENT_ID`, `MSTEAMS_ADMIN_CLIENT_SECRET`, `MSTEAMS_AZURE_SUBSCRIPTION_ID`, `MSTEAMS_AZURE_RESOURCE_GROUP`. The command generates a Teams app package `.zip` and prints the bot credentials. Upload the package in the Teams admin center (or pass `--publish` to auto-publish if allowed).
+
+If you set these env vars during install and keep `MSTEAMS_AUTO_SETUP` unset/true, the installer will auto-run `teams-setup` and write the bot credentials into `.env` for you.
 
 1. Go to [Azure Portal](https://portal.azure.com/) → **Bot Services** → **Create**
 2. Note your **App ID**, **App Password**, and **Tenant ID**
-3. Set the messaging endpoint to: `https://<your-public-host>/teams/api/messages`
+3. Set the messaging endpoint to: `https://<your-public-host>/teams/api/messages` (use ngrok or Tailscale Funnel for local dev)
 4. Add to `.env`:
    ```
    MSTEAMS_APP_ID=<App ID>
@@ -405,9 +420,8 @@ Teams requires an Azure Bot registration (free tier available).
    MSTEAMS_TENANT_ID=<Tenant ID>
    MSTEAMS_ALLOW_FROM=<comma-separated user IDs, or leave blank>
    ```
-5. Teams **requires a publicly accessible HTTPS endpoint** — use a reverse proxy, ngrok, or Tailscale Funnel
 
-> **Note:** Set `MSTEAMS_VALIDATE_TOKEN=true` (default) to verify Azure JWT tokens on incoming requests.
+> **Note:** Set `MSTEAMS_VALIDATE_TOKEN=false` for local testing if you cannot validate Azure JWT tokens.
 </details>
 
 <details>
@@ -435,7 +449,7 @@ Uses the [WhatsApp Business Cloud API](https://developers.facebook.com/docs/what
 <details>
 <summary><strong>Signal</strong></summary>
 
-Signal connects via [signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api), which wraps Signal's desktop protocol. No public URL needed — COpenClaw polls the REST API.
+Signal connects via [signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api), which wraps Signal's desktop protocol. Local-only; no public URL needed.
 
 1. Run signal-cli-rest-api:
    ```bash
@@ -451,8 +465,9 @@ Signal connects via [signal-cli-rest-api](https://github.com/bbernhard/signal-cl
    SIGNAL_ALLOW_FROM=+1234567890,+0987654321
    ```
    Phone numbers are in E.164 format (with `+`).
+4. Optional sanity check: `curl http://localhost:8080/v1/about`
 
-**Interactive setup:** `python scripts/configure.py` also supports Signal interactive setup — send a message to your Signal number and the script will detect the sender and offer to authorize them.
+**Interactive setup:** `python scripts/configure.py` supports Signal pairing — send a message to your Signal number and the script will detect the sender and offer to authorize them.
 </details>
 
 <details>

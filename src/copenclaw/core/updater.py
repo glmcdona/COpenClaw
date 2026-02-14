@@ -271,14 +271,19 @@ def format_update_check(info: UpdateInfo | None) -> str:
             lines.append(f"  … and {len(info.changed_files) - 20} more")
 
     if info.conflict_files:
-        lines.append(f"\n⚠️ **Local modifications that would be overwritten:**")
+        lines.append("\n⚠️ **Local changes that overlap this update:**")
         for f in info.conflict_files:
             lines.append(f"  • `{f}`")
-        lines.append("\nThese files have local changes. Back them up before updating!")
+        lines.append("\nThese are uncommitted edits in your repo that touch the same files.")
+        lines.append("Updating would overwrite those edits unless you stash or commit them first.")
     elif info.locally_modified:
-        lines.append(f"\n📝 You have {len(info.locally_modified)} locally modified file(s), but none conflict with the update.")
+        lines.append(
+            f"\n📝 You have {len(info.locally_modified)} locally modified file(s) "
+            "(uncommitted changes), but none overlap this update."
+        )
 
     lines.append("\nUse `/update apply` to apply the update.")
+    lines.append("When you run it, I will automatically attempt to merge any conflicts.")
 
     return "\n".join(lines)
 

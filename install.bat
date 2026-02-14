@@ -370,6 +370,32 @@ if errorlevel 1 (
 :: Record disclaimer acceptance
 python -c "from copenclaw.core.disclaimer import record_acceptance; record_acceptance()" >nul 2>&1
 
+:: Optional: auto-provision Microsoft Teams bot if admin credentials are available
+if exist ".env" (
+    for /f "usebackq tokens=1,* delims==" %%a in (".env") do (
+        if not "%%a"=="" if not "%%a:~0,1"=="#" set "%%a=%%b"
+    )
+)
+
+set "AUTO_TEAMS_SETUP=true"
+if /i "%MSTEAMS_AUTO_SETUP%"=="false" set "AUTO_TEAMS_SETUP=false"
+if /i "%MSTEAMS_AUTO_SETUP%"=="0" set "AUTO_TEAMS_SETUP=false"
+if /i "%MSTEAMS_AUTO_SETUP%"=="no" set "AUTO_TEAMS_SETUP=false"
+
+if "!AUTO_TEAMS_SETUP!"=="true" (
+    if defined MSTEAMS_ADMIN_TENANT_ID if defined MSTEAMS_ADMIN_CLIENT_ID if defined MSTEAMS_ADMIN_CLIENT_SECRET if defined MSTEAMS_AZURE_SUBSCRIPTION_ID if defined MSTEAMS_AZURE_RESOURCE_GROUP if defined MSTEAMS_BOT_ENDPOINT (
+        if not defined MSTEAMS_APP_ID if not defined MSTEAMS_APP_PASSWORD if not defined MSTEAMS_TENANT_ID (
+            echo   Auto-provisioning Microsoft Teams bot...
+            ".venv\Scripts\python.exe" -m copenclaw.cli teams-setup --messaging-endpoint "!MSTEAMS_BOT_ENDPOINT!" --write-env ".env"
+            if errorlevel 1 (
+                echo   [!!] Teams auto-provisioning failed. Run 'copenclaw teams-setup' manually.
+            ) else (
+                echo   [OK] Teams auto-provisioning complete.
+            )
+        )
+    )
+)
+
 :: ── Step 5: Autostart ───────────────────────────────────────────────────
 
 echo.

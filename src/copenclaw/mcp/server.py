@@ -202,10 +202,19 @@ def get_router(
             return {"status": "ok"}
         if req.channel == "teams":
             if not msteams_creds:
-                raise HTTPException(status_code=400, detail="Teams not configured")
+                raise HTTPException(
+                    status_code=400,
+                    detail="Teams not configured. Set MSTEAMS_APP_ID, MSTEAMS_APP_PASSWORD, MSTEAMS_TENANT_ID.",
+                )
             service_url = req.service_url or msteams_creds.get("service_url")
             if not service_url:
-                raise HTTPException(status_code=400, detail="service_url required for Teams")
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "service_url required for Teams (from webhook payload). "
+                        "Pass service_url or send a Teams message to capture it."
+                    ),
+                )
             TeamsAdapter(
                 app_id=msteams_creds["app_id"],
                 app_password=msteams_creds["app_password"],
