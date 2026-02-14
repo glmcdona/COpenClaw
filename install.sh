@@ -4,7 +4,7 @@
 #
 #  Checks prerequisites, installs GitHub Copilot CLI, sets up a Python venv,
 #  runs the interactive channel configurator, and optionally configures
-#  autostart on login (systemd on Linux, launchd on macOS).
+#  autostart on boot (systemd on Linux, launchd on macOS).
 #
 #  Usage:
 #    ./install.sh             Normal install
@@ -429,16 +429,12 @@ step "5/6" "Autostart configuration..."
 SKIP_AUTOSTART="${SKIP_AUTOSTART:-false}"
 if [ "$SKIP_AUTOSTART" = "true" ]; then
     info "Skipped (SKIP_AUTOSTART=true)."
+elif [ ! -t 0 ]; then
+    info "Skipped autostart (non-interactive install)."
 else
-    if [ ! -t 0 ]; then
-        want_autostart="y"
-        info "Non-interactive install detected; enabling autostart by default."
-    else
-        echo ""
-        read -rp "  Set COpenClaw to start automatically on login? (Y/n): " want_autostart
-    fi
-
-    if [ -z "$want_autostart" ] || [[ "$want_autostart" =~ ^[Yy] ]]; then
+    echo ""
+    read -rp "  Set COpenClaw to start automatically on login? (y/N): " want_autostart
+    if [[ "$want_autostart" =~ ^[Yy] ]]; then
         if [ "$(uname -s)" = "Darwin" ]; then
             # ── macOS: launchd ────────────────────────────────────────
             PLIST_DIR="$HOME/Library/LaunchAgents"
@@ -513,6 +509,11 @@ UNIT
             info "Status:       systemctl --user status copenclaw"
             info "Logs:         journalctl --user -u copenclaw -f"
             info "Disable:      systemctl --user disable copenclaw"
+
+            # Enable lingering so services run without an active login session
+            if command -v loginctl &>/dev/null; then
+                loginctl enable-linger "$(whoami)" 2>/dev/null || true
+            fi
         fi
     else
         info "Skipped autostart.  Start manually with: COpenClaw serve"

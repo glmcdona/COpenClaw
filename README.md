@@ -90,7 +90,7 @@ chmod +x install.sh && ./install.sh
 4. **Configure your workspace** — create `~/.copenclaw/` and link in folders you want the bot to access
 5. **Detect installed chat apps** — scan for Telegram, WhatsApp, Signal, Teams, Slack
 6. **Walk you through channel setup** — prompt for API credentials for each platform
-7. **Optionally set up autostart on login** — Windows Scheduled Task, systemd service (Linux), or LaunchAgent (macOS)
+7. **Optionally set up autostart** — Windows Scheduled Task, systemd service (Linux), or LaunchAgent (macOS)
 8. **Verify the installation** — quick health check
 
 Re-running the installer will `git pull` to update, then offer to **repair** (rebuild venv) or **reconfigure** (re-run channel setup).
