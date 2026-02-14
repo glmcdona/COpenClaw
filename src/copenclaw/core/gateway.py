@@ -1661,9 +1661,10 @@ def create_app() -> FastAPI:
                     exec_args = [sys.executable, resolved] + argv[1:]
                     logger.info("Re-executing process: %s %s", sys.executable, exec_args[1:])
                     os.execv(sys.executable, exec_args)
-                exec_args = [resolved] + argv[1:]
-                logger.info("Re-executing process: %s %s", resolved, exec_args[1:])
-                os.execvp(resolved, exec_args)
+                else:
+                    exec_args = [resolved] + argv[1:]
+                    logger.info("Re-executing process: %s %s", resolved, exec_args[1:])
+                    os.execvp(resolved, exec_args)
 
         module_args = ["-m", "copenclaw.cli"] + (argv[1:] or ["serve"])
         logger.info("Re-executing process: %s %s", sys.executable, module_args)
