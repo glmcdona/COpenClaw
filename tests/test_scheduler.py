@@ -80,6 +80,14 @@ def test_validate_payload_teams_missing_service_url() -> None:
     errors = Scheduler.validate_payload({"prompt": "x", "channel": "teams", "target": "1"})
     assert any("service_url" in e for e in errors)
 
+def test_validate_payload_continuous_tick_requires_task_id() -> None:
+    errors = Scheduler.validate_payload({"type": "continuous_tick"})
+    assert any("task_id" in e for e in errors)
+
+def test_validate_payload_continuous_tick_ok() -> None:
+    errors = Scheduler.validate_payload({"type": "continuous_tick", "task_id": "task-123"})
+    assert errors == []
+
 def test_validate_cron() -> None:
     assert Scheduler.validate_cron("*/5 * * * *") is True
     assert Scheduler.validate_cron("bad") is False

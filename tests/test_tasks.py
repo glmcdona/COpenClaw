@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import json
 import tempfile
 
 import pytest
@@ -575,6 +576,94 @@ class TestRecoveryManagement:
         assert updated.status == "pending"
         assert updated.recovery_pending is False
         assert len(tm.recovery_pending_tasks()) == 0
+
+
+class TestContinuousImprovement:
+    def test_create_continuous_task_initializes_state_and_checkpoints(self, tm):
+        task = tm.create_task(
+            name="CI Task",
+            prompt="Improve quality",
+            task_type="continuous_improvement",
+            ci_config={"max_iterations": 3},
+        )
+        assert task.task_type == "continuous_improvement"
+        assert task.ci_config["max_iterations"] == 3
+        assert task.ci_state["phase"] == "plan"
+        assert os.path.exists(os.path.join(task.working_dir, "ci-checkpoints.jsonl"))
+        assert os.path.exists(os.path.join(task.working_dir, "ci-latest-checkpoint.json"))
+
+    def test_progress_updates_iteration_and_iteration_log(self, tm):
+        task = tm.create_task(
+            name="CI Task",
+            prompt="Improve quality",
+            task_type="continuous_improvement",
+            ci_config={"max_iterations": 5},
+        )
+        tm.update_status(task.task_id, "running")
+        msg = tm.handle_report(
+            task.task_id,
+            "progress",
+            "ITERATION_RESULT: first pass",
+            from_tier="worker",
+            continuous={"score": 0.42, "checkpoint": True},
+        )
+        updated = tm.get(task.task_id)
+        assert msg.msg_type == "progress"
+        assert updated.ci_state["iteration"] == 1
+        assert updated.ci_state["last_score"] == 0.42
+        assert os.path.exists(os.path.join(task.working_dir, "ci-iterations.jsonl"))
+
+    def test_max_iterations_budget_auto_completes(self, tm):
+        task = tm.create_task(
+            name="CI Budget",
+            prompt="Improve",
+            task_type="continuous_improvement",
+            ci_config={"max_iterations": 1},
+        )
+        tm.update_status(task.task_id, "running")
+        msg = tm.handle_report(
+            task.task_id,
+            "progress",
+            "ITERATION_RESULT: done",
+            from_tier="worker",
+            continuous={"checkpoint": True},
+        )
+        updated = tm.get(task.task_id)
+        assert msg.msg_type == "completed"
+        assert updated.status == "completed"
+        assert updated.ci_state["stop_reason"] == "max_iterations_reached"
+
+    def test_stale_active_continuous_without_checkpoint_requires_input(self, tm):
+        task = tm.create_task(
+            name="CI Resume",
+            prompt="Improve",
+            task_type="continuous_improvement",
+        )
+        tm.update_status(task.task_id, "running")
+        for fname in ("ci-latest-checkpoint.json", "ci-checkpoints.jsonl"):
+            path = os.path.join(task.working_dir, fname)
+            if os.path.exists(path):
+                os.remove(path)
+        stale = tm.stale_active_tasks()
+        assert all(t.task_id != task.task_id for t in stale)
+        updated = tm.get(task.task_id)
+        assert updated.status == "needs_input"
+        assert updated.ci_state["stop_reason"] == "checkpoint_missing_or_invalid"
+
+    def test_priority_patch_updates_ci_budgets(self, tm):
+        task = tm.create_task(
+            name="CI Priority",
+            prompt="Improve",
+            task_type="continuous_improvement",
+        )
+        tm.send_message(
+            task.task_id,
+            "priority",
+            json.dumps({"budget_patch": {"max_iterations": 9, "max_wall_clock_seconds": 120}}),
+        )
+        updated = tm.get(task.task_id)
+        assert updated.ci_config["max_iterations"] == 9
+        assert updated.ci_config["max_wall_clock_seconds"] == 120
 
 # ── Session ID tracking ──────────────────────────────────────
 

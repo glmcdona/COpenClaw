@@ -87,6 +87,10 @@ class Scheduler:
             if not payload.get("task_id"):
                 errors.append("task_id is required for supervisor_check")
             return errors
+        if job_type == "continuous_tick":
+            if not payload.get("task_id"):
+                errors.append("task_id is required for continuous_tick")
+            return errors
         channel = payload.get("channel")
         if channel and channel not in ("telegram", "teams"):
             errors.append(f"unsupported channel: {channel}")

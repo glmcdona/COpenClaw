@@ -619,6 +619,35 @@ def create_app() -> FastAPI:
                 scheduler.reschedule(job.job_id, datetime.utcnow() + timedelta(seconds=repeat_seconds))
                 return status, True
             return status, False
+        if payload_type == "continuous_tick":
+            task_id = job.payload.get("task_id")
+            repeat_seconds = int(job.payload.get("repeat_seconds", 0) or 0)
+            task = task_manager.get(task_id) if task_manager else None
+            if not task or task.status in ("completed", "failed", "cancelled"):
+                scheduler.cancel(job.job_id)
+                return "cancelled", False
+            if getattr(task, "task_type", "standard") != "continuous_improvement":
+                scheduler.cancel(job.job_id)
+                return "cancelled", False
+            if task.status == "running":
+                try:
+                    task_manager.send_message(
+                        task_id=task.task_id,
+                        msg_type="instruction",
+                        content="Continuous iteration tick: checkpoint progress, evaluate deltas, and continue the next bounded iteration.",
+                        from_tier="orchestrator",
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug("Failed to send continuous tick instruction for %s", task.task_id, exc_info=True)
+                if task.auto_supervise and worker_pool:
+                    worker_pool.request_supervisor_check(task.task_id)
+                status = "tick_delivered"
+            else:
+                status = f"tick_skipped_{task.status}"
+            if repeat_seconds > 0:
+                scheduler.reschedule(job.job_id, datetime.utcnow() + timedelta(seconds=repeat_seconds))
+                return status, True
+            return status, False
 
         prompt = job.payload.get("prompt")
         channel = job.payload.get("channel")
