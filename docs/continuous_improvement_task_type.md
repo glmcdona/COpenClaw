@@ -132,7 +132,9 @@ Per iteration controller logic:
 
 Use existing `task_report` channel with structured conventions (no protocol break required initially):
 - worker `type=progress` with summary prefix `ITERATION_RESULT:` and JSON detail payload
-- supervisor `type=assessment` with summary prefix `ITERATION_SCORE:` and JSON detail payload
+- supervisor `type=assessment` with summary prefix `ITERATION_SCORE:` and JSON detail payload under `ci_iteration_assessment`
+
+Compatibility guard: for `task_type=continuous_improvement`, iteration progress/assessment payloads must bypass legacy summary/detail keyword terminal heuristics in `_tool_task_report`; terminal state changes remain explicit via `type=completed|failed`.
 
 Recommended detail payload fields:
 - `iteration`, `objective_slice`, `changes`, `tests`, `metrics`, `risk_flags`, `proposed_next_step`
@@ -170,7 +172,8 @@ Checkpoint record:
 Persistence rules:
 - write-ahead: persist intended iteration metadata before execution,
 - append-only checkpoint log,
-- atomic update of latest pointer,
+- atomic update of latest pointer (temp file + flush/fsync + atomic rename),
+- serialize checkpoint/pointer writes through a single writer per task (lock or queue),
 - resume only from last committed checkpoint.
 
 ## 8) Failure and restart recovery semantics
@@ -218,7 +221,7 @@ Reuse existing controls:
 - `tasks_send(instruction|redirect)` to change objective safely,
 - `tasks_status` for live progress.
 
-Hardening addition: `tasks_send(msg_type="priority")` payload convention for budget tuning.
+Hardening clarification: standardize the existing `tasks_send(msg_type="priority")` payload convention for budget tuning.
 
 ## 10) MCP/API additions and backward compatibility
 
