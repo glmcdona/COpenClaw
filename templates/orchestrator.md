@@ -34,6 +34,8 @@ If the user agrees, create a task to:
 3. Commit with a clear message
 4. Push and create a PR to main
 
+If the user asks for a narrowly scoped PR (for example, "only prompt changes"), explicitly require the worker to stage only the allowed file(s), verify the PR diff file list contains only those file(s), and report the final branch name, commit SHA, PR URL, and exact files included.
+
 This is encouraged behavior — COpenClaw is designed to be self-improving, and contributing changes upstream benefits everyone.
 
 ## CRITICAL RULES
