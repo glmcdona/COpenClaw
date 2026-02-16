@@ -1770,3 +1770,114 @@ class TestStuckDetection:
         assert "DECISION DEADLINES" in result
         assert "Do NOT report" in result
         assert "assessment" in result
+
+
+class TestContinuousImprovementProtocol:
+    def _make_handler(self, data_dir: str) -> MCPProtocolHandler:
+        tm = TaskManager(data_dir=data_dir)
+        pool = WorkerPool(mcp_server_url="http://127.0.0.1:18790/mcp")
+        scheduler = Scheduler()
+        policy = ExecutionPolicy(allow_all=True)
+        return MCPProtocolHandler(
+            scheduler=scheduler,
+            data_dir=data_dir,
+            task_manager=tm,
+            worker_pool=pool,
+            execution_policy=policy,
+        )
+
+    def _call_tool(self, handler: MCPProtocolHandler, tool_name: str, args: dict, task_id: str | None = None, role: str | None = None) -> dict:
+        response = handler.handle_request(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool_name, "arguments": args}},
+            task_id=task_id,
+            role=role,
+        )
+        import json
+        return json.loads(response["result"]["content"][0]["text"])
+
+    def test_tasks_create_continuous_includes_status_block(self, tmp_path):
+        data_dir = str(tmp_path / "data")
+        os.makedirs(data_dir)
+        handler = self._make_handler(data_dir)
+
+        result = self._call_tool(handler, "tasks_create", {
+            "prompt": "Run continuous loop",
+            "task_type": "continuous_improvement",
+            "continuous": {"max_iterations": 4, "objective": "Improve tests"},
+            "auto_supervise": False,
+        })
+        task_id = result["task_id"]
+        status = self._call_tool(handler, "tasks_status", {"task_id": task_id})
+        assert status["task_type"] == "continuous_improvement"
+        assert "continuous" in status
+        assert status["continuous"]["config"]["max_iterations"] == 4
+
+    def test_supervisor_assessment_keywords_do_not_autocomplete_continuous(self, tmp_path):
+        data_dir = str(tmp_path / "data")
+        os.makedirs(data_dir)
+        handler = self._make_handler(data_dir)
+        task = handler.task_manager.create_task(
+            name="CI",
+            prompt="Continuous",
+            task_type="continuous_improvement",
+            auto_supervise=True,
+        )
+        handler.task_manager.update_status(task.task_id, "running")
+        task.completion_deferred = True
+        handler.task_manager._save()
+
+        result = self._call_tool(handler, "task_report", {
+            "task_id": task.task_id,
+            "type": "assessment",
+            "summary": "ITERATION_SCORE: {'completed_checks': 5, 'failed': 0}",
+            "detail": "{\"completed\": false, \"failed\": 0}",
+            "from_tier": "supervisor",
+            "continuous": {"iteration": 1, "score": 0.3},
+        }, task_id=task.task_id, role="supervisor")
+        assert result["status"] == "reported"
+        updated = handler.task_manager.get(task.task_id)
+        assert updated.status != "completed"
+
+    def test_continuous_budget_completion_propagates_through_task_report(self, tmp_path):
+        data_dir = str(tmp_path / "data")
+        os.makedirs(data_dir)
+        handler = self._make_handler(data_dir)
+        task = handler.task_manager.create_task(
+            name="Budget",
+            prompt="Continuous",
+            task_type="continuous_improvement",
+            ci_config={"max_iterations": 1},
+            auto_supervise=False,
+        )
+        handler.task_manager.update_status(task.task_id, "running")
+        result = self._call_tool(handler, "task_report", {
+            "task_id": task.task_id,
+            "type": "progress",
+            "summary": "ITERATION_RESULT: 1",
+            "from_tier": "worker",
+            "continuous": {"iteration": 1, "checkpoint": True},
+        }, task_id=task.task_id, role="worker")
+        assert result["status"] == "reported"
+        updated = handler.task_manager.get(task.task_id)
+        assert updated.status == "completed"
+        assert updated.ci_state["stop_reason"] == "max_iterations_reached"
+
+    def test_tasks_send_priority_updates_continuous_budget(self, tmp_path):
+        data_dir = str(tmp_path / "data")
+        os.makedirs(data_dir)
+        handler = self._make_handler(data_dir)
+        task = handler.task_manager.create_task(
+            name="Priority",
+            prompt="Continuous",
+            task_type="continuous_improvement",
+            auto_supervise=False,
+        )
+
+        result = self._call_tool(handler, "tasks_send", {
+            "task_id": task.task_id,
+            "msg_type": "priority",
+            "content": "{\"budget_patch\": {\"max_iterations\": 7}}",
+        })
+        assert result["status"] == "sent"
+        updated = handler.task_manager.get(task.task_id)
+        assert updated.ci_config["max_iterations"] == 7

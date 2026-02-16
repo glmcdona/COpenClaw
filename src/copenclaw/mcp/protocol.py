@@ -207,6 +207,8 @@ TASK_TOOLS = [
                 "check_interval": {"type": "integer", "default": 300, "description": "Supervisor check interval in seconds"},
                 "auto_supervise": {"type": "boolean", "default": True, "description": "Whether to auto-start a supervisor"},
                 "supervisor_instructions": {"type": "string", "description": "What the supervisor should watch for"},
+                "task_type": {"type": "string", "enum": ["standard", "continuous_improvement"], "default": "standard"},
+                "continuous": {"type": "object", "description": "Continuous improvement configuration when task_type=continuous_improvement"},
                 "on_complete": {"type": "string", "description": "A prompt to feed to the orchestrator when this task finishes (success, failure, or cancellation). Use this for chaining tasks or retrying on failure. The hook prompt includes the terminal reason so the orchestrator can react appropriately."},
             },
             "required": ["prompt", "plan"],
@@ -236,6 +238,8 @@ TASK_TOOLS = [
                 "service_url": {"type": "string", "description": "Required for Teams"},
                 "check_interval": {"type": "integer", "default": 300, "description": "Supervisor check interval in seconds"},
                 "auto_supervise": {"type": "boolean", "default": True, "description": "Whether to auto-start a supervisor"},
+                "task_type": {"type": "string", "enum": ["standard", "continuous_improvement"], "default": "standard"},
+                "continuous": {"type": "object", "description": "Continuous improvement configuration when task_type=continuous_improvement"},
                 "on_complete": {"type": "string", "description": "A prompt to feed to the orchestrator when this task finishes (success, failure, or cancellation)."},
             },
             "required": ["prompt"],
@@ -319,6 +323,7 @@ TASK_TOOLS = [
                 "summary": {"type": "string", "description": "One-line concise summary"},
                 "detail": {"type": "string", "description": "Longer detail (optional)"},
                 "artifact_url": {"type": "string", "description": "URL/path if type=artifact"},
+                "continuous": {"type": "object", "description": "Optional structured continuous-improvement iteration payload"},
                 "from_tier": {"type": "string", "enum": ["worker", "supervisor"], "default": "worker"},
                 "notify_user": {"type": "boolean", "default": False},
             },
@@ -1054,6 +1059,8 @@ class MCPProtocolHandler:
             prompt=args["prompt"],
             plan=args.get("plan", ""),
             supervisor_instructions=args.get("supervisor_instructions", ""),
+            task_type=args.get("task_type", "standard"),
+            ci_config=args.get("continuous"),
             channel=channel,
             target=target,
             service_url=args.get("service_url", ""),
@@ -1077,6 +1084,7 @@ class MCPProtocolHandler:
                 "supervisor_instructions": getattr(task, "supervisor_instructions", None),
                 "channel": getattr(task, "channel", ""),
                 "target": getattr(task, "target", ""),
+                "task_type": getattr(task, "task_type", "standard"),
             })
 
         # NOTE: We do NOT send a notification here.  The orchestrator's own
@@ -1090,6 +1098,7 @@ class MCPProtocolHandler:
             "status": "proposed",
             "plan": task.plan,
             "auto_supervise": task.auto_supervise,
+            "task_type": task.task_type,
             "message": "Proposal sent to user. Waiting for approval.",
         }
 
@@ -1116,6 +1125,8 @@ class MCPProtocolHandler:
         task = tm.create_task(
             name=name,
             prompt=args["prompt"],
+            task_type=args.get("task_type", "standard"),
+            ci_config=args.get("continuous"),
             channel=channel,
             target=target,
             service_url=args.get("service_url", ""),
@@ -1137,6 +1148,7 @@ class MCPProtocolHandler:
                 "channel": getattr(task, "channel", ""),
                 "target": getattr(task, "target", ""),
                 "check_interval": getattr(task, "check_interval", None),
+                "task_type": getattr(task, "task_type", "standard"),
             })
 
         return self._start_task(task)
@@ -1261,12 +1273,16 @@ class MCPProtocolHandler:
         pool = self._require_worker_pool()
 
         on_worker_output, on_worker_complete = self._build_worker_callbacks(tm, pool)
+        if getattr(task, "task_type", "standard") == "continuous_improvement":
+            tm.mark_continuous_started(task.task_id)
+            task = tm.get(task.task_id) or task
 
         # Start worker
         tm.update_status(task.task_id, "running")
+        worker_prompt = tm.build_continuous_prompt(task) if getattr(task, "task_type", "standard") == "continuous_improvement" else task.prompt
         pool.start_worker(
             task_id=task.task_id,
-            prompt=task.prompt,
+            prompt=worker_prompt,
             working_dir=task.working_dir,
             on_output=on_worker_output,
             on_complete=on_worker_complete,
@@ -1282,9 +1298,10 @@ class MCPProtocolHandler:
             def on_supervisor_output(task_id: str, output: str) -> None:
                 tm.append_log(task_id, f"\n--- SUPERVISOR CHECK ---\n{output}")
 
+            # Use the same prompt for supervisor as was used for worker
             pool.start_supervisor(
                 task_id=task.task_id,
-                prompt=task.prompt,
+                prompt=worker_prompt,
                 worker_session_id=None,
                 check_interval=task.check_interval,
                 on_output=on_supervisor_output,
@@ -1294,6 +1311,17 @@ class MCPProtocolHandler:
             )
             self._schedule_supervisor_checks(task)
 
+        # Schedule continuous-improvement ticks (if applicable). If no scheduler
+        # is configured, log a warning so operators know ticks will not run.
+        if getattr(task, "task_type", "standard") == "continuous_improvement":
+            if getattr(self, "scheduler", None) is None:
+                logger.warning(
+                    "Continuous improvement task %s started without a scheduler; "
+                    "continuous tick mechanism will not run.",
+                    getattr(task, "task_id", "<unknown>"),
+                )
+            self._schedule_continuous_ticks(task)
+
         return {
             "task_id": task.task_id,
             "name": task.name,
@@ -1301,6 +1329,7 @@ class MCPProtocolHandler:
             "working_dir": task.working_dir,
             "auto_supervise": task.auto_supervise,
             "check_interval": task.check_interval,
+            "task_type": getattr(task, "task_type", "standard"),
         }
 
     def _request_retry_approval(self, task_id: str, reason: str) -> None:
@@ -1363,6 +1392,7 @@ class MCPProtocolHandler:
                     "task_id": t.task_id,
                     "name": t.name,
                     "status": t.status,
+                    "task_type": getattr(t, "task_type", "standard"),
                     "created_at": t.created_at.isoformat(),
                     "updated_at": t.updated_at.isoformat(),
                     "auto_supervise": t.auto_supervise,
@@ -1378,11 +1408,12 @@ class MCPProtocolHandler:
         if not task:
             raise ValueError(f"Task not found: {args['task_id']}")
         limit = args.get("timeline_limit", 20)
-        return {
+        result = {
             "task_id": task.task_id,
             "name": task.name,
             "prompt": task.prompt,
             "status": task.status,
+            "task_type": getattr(task, "task_type", "standard"),
             "created_at": task.created_at.isoformat(),
             "updated_at": task.updated_at.isoformat(),
             "completed_at": task.completed_at.isoformat() if task.completed_at else None,
@@ -1391,6 +1422,9 @@ class MCPProtocolHandler:
             "timeline": task.concise_timeline(limit),
             "pending_inbox": len([m for m in task.inbox if not m.acknowledged]),
         }
+        if getattr(task, "task_type", "standard") == "continuous_improvement":
+            result["continuous"] = tm.continuous_status(task)
+        return result
 
     def _tool_tasks_logs(self, args: dict[str, Any]) -> dict:
         tm = self._require_task_manager()
@@ -1559,13 +1593,19 @@ class MCPProtocolHandler:
         tm = self._require_task_manager()
         task_id = args["task_id"]
         report_type = args["type"]
+        task_for_report = tm.get(task_id)
+        is_continuous = bool(task_for_report and getattr(task_for_report, "task_type", "standard") == "continuous_improvement")
         from_tier = args.get("from_tier")
         if not from_tier:
             from_tier = self._current_role if self._current_role in ("worker", "supervisor") else "worker"
 
         if from_tier == "supervisor":
-            task = tm.get(task_id)
+            task = task_for_report
             if task and report_type in ("assessment", "completed"):
+                if report_type == "assessment":
+                    task.supervisor_assessment_count += 1
+                    tm._save()
+                # Allow stuck-assessment detection for both standard and continuous tasks
                 summary_text = args.get("summary", "")
                 detail_text = args.get("detail", "")
                 combined = f"{summary_text} {detail_text}".lower()
@@ -1585,11 +1625,6 @@ class MCPProtocolHandler:
                     worker = self.worker_pool.get_worker(task_id)
                     worker_running = worker.is_running if worker else False
                 can_complete = task.completion_deferred or not worker_running
-
-                # Track consecutive assessment count for stuck-detection
-                if report_type == "assessment":
-                    task.supervisor_assessment_count += 1
-                    tm._save()
 
                 # STUCK-ASSESSMENT DETECTION: If the worker is dead and the
                 # supervisor has assessed 2+ times without finalizing, force
@@ -1680,22 +1715,24 @@ class MCPProtocolHandler:
             detail=args.get("detail", ""),
             artifact_url=args.get("artifact_url", ""),
             from_tier=from_tier,
+            continuous=args.get("continuous"),
         )
         if not msg:
             raise ValueError(f"Task not found: {task_id}")
+        effective_report_type = msg.msg_type
 
         # If task is terminal, stop worker/supervisor threads
-        if report_type in ("completed", "failed") and self.worker_pool:
+        if effective_report_type in ("completed", "failed") and self.worker_pool:
             self.worker_pool.stop_task(task_id)
             task = tm.get(task_id)
             if task:
                 self._cancel_supervisor_job(task)
 
         # Fire on_complete hook if task just reached a terminal state
-        if report_type in ("completed", "failed"):
+        if effective_report_type in ("completed", "failed"):
             task = tm.get(task_id)
             if task:
-                reason = "COMPLETED successfully" if report_type == "completed" else f"FAILED — {args.get('summary', 'unknown error')[:300]}"
+                reason = "COMPLETED successfully" if effective_report_type == "completed" else f"FAILED — {args.get('summary', 'unknown error')[:300]}"
                 self._fire_on_complete_hook(task, reason, args.get("summary", ""), args.get("detail", ""))
 
         # Auto-notify user for certain message types
@@ -1703,7 +1740,7 @@ class MCPProtocolHandler:
         if should_notify:
             self._notify_user_about_task(task_id, msg)
 
-        self._audit(f"task.report.{report_type}", {
+        self._audit(f"task.report.{effective_report_type}", {
             "summary": args["summary"][:500],
         })
 
@@ -1976,6 +2013,34 @@ class MCPProtocolHandler:
         tm = self._require_task_manager()
         tm._save()
 
+    def _schedule_continuous_ticks(self, task: Any) -> None:
+        if not self.scheduler:
+            return
+        if getattr(task, "task_type", "standard") != "continuous_improvement":
+            return
+        interval = 60
+        ci_config = getattr(task, "ci_config", {}) or {}
+        if isinstance(ci_config, dict):
+            try:
+                interval = max(10, int(ci_config.get("min_iteration_interval_seconds", 60)))
+            except Exception:  # noqa: BLE001
+                interval = 60
+        if getattr(task, "ci_tick_job_id", ""):
+            self.scheduler.cancel(task.ci_tick_job_id)
+        payload = {
+            "type": "continuous_tick",
+            "task_id": task.task_id,
+            "repeat_seconds": interval,
+        }
+        job = self.scheduler.schedule(
+            name=f"continuous-tick-{task.task_id[:8]}",
+            run_at=datetime.utcnow() + timedelta(seconds=interval),
+            payload=payload,
+        )
+        task.ci_tick_job_id = job.job_id
+        task.updated_at = _now()
+        self._require_task_manager()._save()
+
     def _cancel_supervisor_job(self, task: Any) -> None:
         if not self.scheduler:
             return
@@ -1983,8 +2048,12 @@ class MCPProtocolHandler:
             self.scheduler.cancel(task.supervisor_job_id)
             task.supervisor_job_id = ""
             task.updated_at = _now()
-            tm = self._require_task_manager()
-            tm._save()
+        if getattr(task, "ci_tick_job_id", ""):
+            self.scheduler.cancel(task.ci_tick_job_id)
+            task.ci_tick_job_id = ""
+            task.updated_at = _now()
+        tm = self._require_task_manager()
+        tm._save()
 
     # ── Notification helpers ──────────────────────────────
 
