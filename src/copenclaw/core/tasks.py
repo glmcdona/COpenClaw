@@ -470,35 +470,48 @@ class TaskManager:
             json.dump(payload, handle, ensure_ascii=False, indent=2)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp, path)
+        try:
+            os.replace(tmp, path)
+        except Exception:
+            # Best-effort cleanup of temporary file if os.replace() fails
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass  # Ignore cleanup failures to avoid masking the original error
+            raise
+
+    def _record_ci_checkpoint_unlocked(self, task: Task, reason: str, extra: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+        """Record a checkpoint without acquiring the lock. Caller must hold ci_lock."""
+        state = task.ci_state
+        seq = int(state.get("checkpoint_seq", 0)) + 1
+        state["checkpoint_seq"] = seq
+        checkpoint_id = f"chk-{seq:06d}"
+        now_iso = _now().isoformat()
+        record = {
+            "checkpoint_id": checkpoint_id,
+            "task_id": task.task_id,
+            "iteration": int(state.get("iteration", 0)),
+            "phase": state.get("phase", "execute"),
+            "ts": now_iso,
+            "reason": reason,
+            "resume_hint": f"continue_from_iteration_{int(state.get('iteration', 0)) + 1}",
+            "ci_state_snapshot": copy.deepcopy(state),
+            "extra": extra or {},
+        }
+        paths = self._ci_paths(task)
+        self._append_jsonl(paths["checkpoints"], record)
+        self._write_json_atomic(paths["latest"], record)
+        state["last_checkpoint_id"] = checkpoint_id
+        state["last_checkpoint_at"] = now_iso
+        task.updated_at = _now()
+        return record
 
     def _record_ci_checkpoint(self, task: Task, reason: str, extra: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         self._ensure_continuous_defaults(task)
         lock = self._ci_lock(task.task_id)
         with lock:
-            state = task.ci_state
-            seq = int(state.get("checkpoint_seq", 0)) + 1
-            state["checkpoint_seq"] = seq
-            checkpoint_id = f"chk-{seq:06d}"
-            now_iso = _now().isoformat()
-            record = {
-                "checkpoint_id": checkpoint_id,
-                "task_id": task.task_id,
-                "iteration": int(state.get("iteration", 0)),
-                "phase": state.get("phase", "execute"),
-                "ts": now_iso,
-                "reason": reason,
-                "resume_hint": f"continue_from_iteration_{int(state.get('iteration', 0)) + 1}",
-                "ci_state_snapshot": copy.deepcopy(state),
-                "extra": extra or {},
-            }
-            paths = self._ci_paths(task)
-            self._append_jsonl(paths["checkpoints"], record)
-            self._write_json_atomic(paths["latest"], record)
-            state["last_checkpoint_id"] = checkpoint_id
-            state["last_checkpoint_at"] = now_iso
-            task.updated_at = _now()
-            return record
+            return self._record_ci_checkpoint_unlocked(task, reason, extra)
 
     def _load_latest_ci_checkpoint(self, task: Task) -> Optional[dict[str, Any]]:
         paths = self._ci_paths(task)
@@ -515,11 +528,16 @@ class TaskManager:
         if not os.path.exists(checkpoints_path):
             return None
         try:
+            # Read line-by-line without loading entire file into memory
+            last_line: Optional[str] = None
             with open(checkpoints_path, "r", encoding="utf-8") as handle:
-                lines = [line.strip() for line in handle if line.strip()]
-            if not lines:
+                for line in handle:
+                    line = line.strip()
+                    if line:
+                        last_line = line
+            if not last_line:
                 return None
-            payload = json.loads(lines[-1])
+            payload = json.loads(last_line)
             return payload if isinstance(payload, dict) else None
         except Exception:  # noqa: BLE001
             logger.warning("Failed parsing checkpoint log for %s", task.task_id)
@@ -672,15 +690,18 @@ class TaskManager:
         }
         paths = self._ci_paths(task)
         lock = self._ci_lock(task.task_id)
+        
+        # Write iteration log and checkpoint within the same critical section
+        # to maintain ordering consistency between iterations.jsonl and checkpoints.jsonl
         with lock:
             self._append_jsonl(paths["iterations"], iter_record)
-
-        force_type = self._apply_ci_limits(task, data)
-
-        should_checkpoint = bool(data.get("checkpoint")) or msg_type in {"completed", "failed"} or force_type in {"completed", "failed", "needs_input"}
-        if should_checkpoint:
-            reason = data.get("checkpoint_reason", summary[:160] or msg_type)
-            self._record_ci_checkpoint(task, reason=str(reason), extra={"msg_type": msg_type, "from_tier": from_tier})
+            
+            force_type = self._apply_ci_limits(task, data)
+            
+            should_checkpoint = bool(data.get("checkpoint")) or msg_type in {"completed", "failed"} or force_type in {"completed", "failed", "needs_input"}
+            if should_checkpoint:
+                reason = data.get("checkpoint_reason", summary[:160] or msg_type)
+                self._record_ci_checkpoint_unlocked(task, reason=str(reason), extra={"msg_type": msg_type, "from_tier": from_tier})
 
         if force_type:
             return force_type
@@ -770,18 +791,30 @@ class TaskManager:
             raise ValueError("budget_patch must be a JSON object")
 
         updated = False
-        for key in (
+        allowed_keys = (
             "max_wall_clock_seconds",
             "max_iterations",
             "iteration_timeout_seconds",
             "min_iteration_interval_seconds",
             "max_consecutive_failures",
             "max_no_improvement_iterations",
-        ):
+        )
+        
+        for key in allowed_keys:
             if key in patch:
                 current_default = self._normalize_positive_int(task.ci_config.get(key), 1)
                 task.ci_config[key] = self._normalize_positive_int(patch[key], current_default)
                 updated = True
+        
+        # Log any unrecognized budget keys so misconfigurations are visible
+        unknown_keys = set(patch.keys()) - set(allowed_keys)
+        if unknown_keys:
+            logger.warning(
+                "Unrecognized continuous_improvement budget keys in priority patch for task %s: %s",
+                getattr(task, "task_id", "<unknown>"),
+                ", ".join(sorted(str(k) for k in unknown_keys)),
+            )
+        
         if not updated:
             raise ValueError("priority budget patch did not include any supported budget keys")
         task.updated_at = _now()
@@ -1187,6 +1220,9 @@ class TaskManager:
                             task.updated_at = _now()
                             self._save()
                         continue
+                    # Successful checkpoint restoration: persist restored state
+                    task.updated_at = _now()
+                    self._save()
             stale.append(task)
         return stale
 
