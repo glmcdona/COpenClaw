@@ -380,7 +380,7 @@ class TaskManager:
             return lock
 
     def _cleanup_ci_lock(self, task_id: str) -> None:
-        """Remove the CI lock for a task to prevent memory leak."""
+        """Remove the CI lock for a task to prevent unbounded dictionary growth."""
         with self._save_lock:
             self._ci_locks.pop(task_id, None)
 
@@ -482,8 +482,9 @@ class TaskManager:
             os.fsync(handle.fileno())
         try:
             os.replace(tmp, path)
-        except Exception:
+        except Exception as exc:
             # Best-effort cleanup of temporary file if os.replace() fails
+            logger.warning("Failed to atomically write %s (tmp: %s): %s", path, tmp, exc)
             if os.path.exists(tmp):
                 try:
                     os.remove(tmp)
@@ -492,7 +493,10 @@ class TaskManager:
             raise
 
     def _record_ci_checkpoint_unlocked(self, task: Task, reason: str, extra: Optional[dict[str, Any]] = None) -> dict[str, Any]:
-        """Record a checkpoint without acquiring the lock. Caller must hold ci_lock."""
+        """Record a checkpoint without acquiring the lock.
+        
+        Caller must hold the ci_lock for this specific task (self._ci_lock(task.task_id)).
+        """
         state = task.ci_state
         seq = int(state.get("checkpoint_seq", 0)) + 1
         state["checkpoint_seq"] = seq
