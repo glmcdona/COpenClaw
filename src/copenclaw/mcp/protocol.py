@@ -1309,6 +1309,16 @@ class MCPProtocolHandler:
                 task_manager=tm,
             )
             self._schedule_supervisor_checks(task)
+
+        # Schedule continuous-improvement ticks (if applicable). If no scheduler
+        # is configured, log a warning so operators know ticks will not run.
+        if getattr(task, "task_type", "standard") == "continuous_improvement":
+            if getattr(self, "scheduler", None) is None:
+                logger.warning(
+                    "Continuous improvement task %s started without a scheduler; "
+                    "continuous tick mechanism will not run.",
+                    getattr(task, "task_id", "<unknown>"),
+                )
         self._schedule_continuous_ticks(task)
 
         return {
