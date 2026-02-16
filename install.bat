@@ -262,13 +262,25 @@ if not errorlevel 1 (
     echo   Running: winget install GitHub.Copilot
     winget install GitHub.Copilot --accept-source-agreements --accept-package-agreements
     if errorlevel 1 (
-        echo [ERR] winget install failed. Please install Copilot CLI manually.
+        echo [ERR] winget install failed.
+        echo     Run this manually in an elevated PowerShell or Command Prompt:
+        echo       winget install GitHub.Copilot --accept-source-agreements --accept-package-agreements
+        echo     If it still fails, see: https://docs.github.com/en/copilot
     ) else (
         echo   [OK] GitHub Copilot CLI installed
         set "COPILOT_FOUND=1"
     )
-    :: Refresh PATH
-    for /f "tokens=*" %%p in ('echo %PATH%') do set "PATH=%%p"
+    call :refresh_path_from_registry
+    if "!COPILOT_FOUND!"=="0" (
+        where copilot >nul 2>&1
+        if not errorlevel 1 (
+            set "COPILOT_FOUND=1"
+            echo   [OK] GitHub Copilot CLI now available on PATH
+        ) else (
+            echo   [!!] Copilot CLI was not detected in this terminal session yet.
+            echo       Open a new terminal after install and run: copilot --help
+        )
+    )
 ) else (
     echo   [!!] Skipping Copilot CLI install. COpenClaw requires it to function.
     echo   Install later: winget install GitHub.Copilot
@@ -501,6 +513,23 @@ if "%RUN_REPAIR%"=="1" (
     echo   Running self-repair...
     "!VENV_PYTHON!" -m copenclaw.cli repair
 )
+goto :done
+
+:refresh_path_from_registry
+set "MACHINE_PATH="
+set "USER_PATH="
+set "MERGED_PATH="
+for /f "tokens=2,*" %%a in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v Path 2^>nul') do set "MACHINE_PATH=%%b"
+for /f "tokens=2,*" %%a in ('reg query "HKCU\Environment" /v Path 2^>nul') do set "USER_PATH=%%b"
+if defined MACHINE_PATH (
+    if defined USER_PATH (
+        set "MERGED_PATH=!MACHINE_PATH!;!USER_PATH!"
+    ) else (
+        set "MERGED_PATH=!MACHINE_PATH!"
+    )
+)
+if defined MERGED_PATH set "PATH=!MERGED_PATH!"
+exit /b 0
 
 :done
 popd 2>nul
