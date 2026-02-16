@@ -144,6 +144,16 @@ DOWN_MSG_TYPES = {
     "redirect", "cancel", "priority",
 }
 
+# Allowed budget keys for continuous_improvement priority patches
+CI_ALLOWED_BUDGET_KEYS = frozenset([
+    "max_wall_clock_seconds",
+    "max_iterations",
+    "iteration_timeout_seconds",
+    "min_iteration_interval_seconds",
+    "max_consecutive_failures",
+    "max_no_improvement_iterations",
+])
+
 
 @dataclass
 class Task:
@@ -400,15 +410,12 @@ class TaskManager:
 
         # Merge nested sections: only override keys present in source,
         # preserving default values for keys not provided by user.
-        # This avoids the shallow merge problem where dict.update() would
-        # replace the entire nested dict, losing sibling keys.
         for section in ("quality_gate", "retry_policy", "safety"):
             src_section = source.get(section)
             if isinstance(src_section, dict):
                 cfg_section = cfg[section]
                 if isinstance(cfg_section, dict):
-                    for key, value in src_section.items():
-                        cfg_section[key] = value
+                    cfg_section.update(src_section)
 
         if not isinstance(cfg.get("safety", {}).get("require_human_approval_on"), list):
             cfg["safety"]["require_human_approval_on"] = list(_CI_DEFAULT_CONFIG["safety"]["require_human_approval_on"])
@@ -794,23 +801,15 @@ class TaskManager:
             raise ValueError("budget_patch must be a JSON object")
 
         updated = False
-        allowed_keys = (
-            "max_wall_clock_seconds",
-            "max_iterations",
-            "iteration_timeout_seconds",
-            "min_iteration_interval_seconds",
-            "max_consecutive_failures",
-            "max_no_improvement_iterations",
-        )
 
-        for key in allowed_keys:
+        for key in CI_ALLOWED_BUDGET_KEYS:
             if key in patch:
                 current_default = self._normalize_positive_int(task.ci_config.get(key), 1)
                 task.ci_config[key] = self._normalize_positive_int(patch[key], current_default)
                 updated = True
 
         # Log any unrecognized budget keys so misconfigurations are visible
-        unknown_keys = set(patch.keys()) - set(allowed_keys)
+        unknown_keys = set(patch.keys()) - CI_ALLOWED_BUDGET_KEYS
         if unknown_keys:
             logger.warning(
                 "Unrecognized continuous_improvement budget keys in priority patch for task %s: %s",
