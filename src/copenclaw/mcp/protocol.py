@@ -1298,6 +1298,7 @@ class MCPProtocolHandler:
             def on_supervisor_output(task_id: str, output: str) -> None:
                 tm.append_log(task_id, f"\n--- SUPERVISOR CHECK ---\n{output}")
 
+            # Use the same prompt for supervisor as was used for worker
             pool.start_supervisor(
                 task_id=task.task_id,
                 prompt=worker_prompt,
@@ -1319,7 +1320,7 @@ class MCPProtocolHandler:
                     "continuous tick mechanism will not run.",
                     getattr(task, "task_id", "<unknown>"),
                 )
-        self._schedule_continuous_ticks(task)
+            self._schedule_continuous_ticks(task)
 
         return {
             "task_id": task.task_id,
@@ -1604,59 +1605,59 @@ class MCPProtocolHandler:
                 if report_type == "assessment":
                     task.supervisor_assessment_count += 1
                     tm._save()
-                if not (is_continuous and report_type == "assessment"):
-                    summary_text = args.get("summary", "")
-                    detail_text = args.get("detail", "")
-                    combined = f"{summary_text} {detail_text}".lower()
-                    # Only treat as negative if strong failure signals are present
-                    # Words like "not yet verified" or "pending" alone should NOT block
-                    strong_negative = any(k in combined for k in [
-                        "truncated", "incomplete", "missing", "error", "failed",
-                        "cannot", "lack", "lacks", "absent", "broken", "wrong",
-                    ])
-                    positive = any(k in combined for k in [
-                        "verified", "verify", "looks good", "complete", "completed",
-                        "success", "correct", "passed", "ok", "done", "finished",
-                        "created", "built", "working",
-                    ])
-                    worker_running = True
+                # Allow stuck-assessment detection for both standard and continuous tasks
+                summary_text = args.get("summary", "")
+                detail_text = args.get("detail", "")
+                combined = f"{summary_text} {detail_text}".lower()
+                # Only treat as negative if strong failure signals are present
+                # Words like "not yet verified" or "pending" alone should NOT block
+                strong_negative = any(k in combined for k in [
+                    "truncated", "incomplete", "missing", "error", "failed",
+                    "cannot", "lack", "lacks", "absent", "broken", "wrong",
+                ])
+                positive = any(k in combined for k in [
+                    "verified", "verify", "looks good", "complete", "completed",
+                    "success", "correct", "passed", "ok", "done", "finished",
+                    "created", "built", "working",
+                ])
+                worker_running = True
+                if self.worker_pool:
+                    worker = self.worker_pool.get_worker(task_id)
+                    worker_running = worker.is_running if worker else False
+                can_complete = task.completion_deferred or not worker_running
+
+                # STUCK-ASSESSMENT DETECTION: If the worker is dead and the
+                # supervisor has assessed 2+ times without finalizing, force
+                # completion (unless there are strong negative signals).
+                force_complete = False
+                if (report_type == "assessment"
+                        and can_complete
+                        and not worker_running
+                        and task.supervisor_assessment_count >= 2
+                        and not strong_negative):
+                    logger.warning(
+                        "STUCK-ASSESSMENT: Supervisor assessed task %s %d times without "
+                        "finalizing (worker dead). Auto-completing.",
+                        task_id, task.supervisor_assessment_count,
+                    )
+                    force_complete = True
+
+                if can_complete and (report_type == "completed" or force_complete or (report_type == "assessment" and positive and not strong_negative)):
+                    report_type = "completed"
+                    if force_complete:
+                        args["summary"] = f"Auto-finalized after {task.supervisor_assessment_count} assessments: {summary_text}".strip()
+                    else:
+                        args["summary"] = f"Supervisor verified completion: {summary_text}".strip()
+                    task.completion_deferred = False
+                    task.completion_deferred_at = None
+                    task.completion_deferred_summary = ""
+                    task.completion_deferred_detail = ""
+                    task.supervisor_assessment_count = 0  # reset counter
+                    task.updated_at = _now()
+                    tm._save()
+
                     if self.worker_pool:
-                        worker = self.worker_pool.get_worker(task_id)
-                        worker_running = worker.is_running if worker else False
-                    can_complete = task.completion_deferred or not worker_running
-
-                    # STUCK-ASSESSMENT DETECTION: If the worker is dead and the
-                    # supervisor has assessed 2+ times without finalizing, force
-                    # completion (unless there are strong negative signals).
-                    force_complete = False
-                    if (report_type == "assessment"
-                            and can_complete
-                            and not worker_running
-                            and task.supervisor_assessment_count >= 2
-                            and not strong_negative):
-                        logger.warning(
-                            "STUCK-ASSESSMENT: Supervisor assessed task %s %d times without "
-                            "finalizing (worker dead). Auto-completing.",
-                            task_id, task.supervisor_assessment_count,
-                        )
-                        force_complete = True
-
-                    if can_complete and (report_type == "completed" or force_complete or (report_type == "assessment" and positive and not strong_negative)):
-                        report_type = "completed"
-                        if force_complete:
-                            args["summary"] = f"Auto-finalized after {task.supervisor_assessment_count} assessments: {summary_text}".strip()
-                        else:
-                            args["summary"] = f"Supervisor verified completion: {summary_text}".strip()
-                        task.completion_deferred = False
-                        task.completion_deferred_at = None
-                        task.completion_deferred_summary = ""
-                        task.completion_deferred_detail = ""
-                        task.supervisor_assessment_count = 0  # reset counter
-                        task.updated_at = _now()
-                        tm._save()
-
-                        if self.worker_pool:
-                            self.worker_pool.request_supervisor_check(task_id)
+                        self.worker_pool.request_supervisor_check(task_id)
 
         # If a WORKER reports "completed" and there's an active supervisor,
         # defer completion — let the supervisor verify the outcome first
