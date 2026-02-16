@@ -71,7 +71,7 @@ set /p "AGREE=Type I AGREE to accept these risks and continue, or press Enter to
 if not "!AGREE!"=="I AGREE" (
     echo.
     echo [ERR] You must type exactly 'I AGREE' to proceed. Exiting.
-    goto :end
+    goto :done
 )
 echo   [OK] Risks acknowledged.
 echo.
@@ -95,7 +95,7 @@ where git >nul 2>&1
 if errorlevel 1 (
     echo [ERR] git is required but not found on PATH.
     echo   Install git from: https://git-scm.com/download/win
-    goto :end
+    goto :done
 )
 
 if exist "!INSTALL_DIR!\pyproject.toml" (
@@ -111,7 +111,7 @@ if exist "!INSTALL_DIR!\pyproject.toml" (
     git clone https://github.com/glmcdona/copenclaw.git "!INSTALL_DIR!"
     if errorlevel 1 (
         echo [ERR] git clone failed. Check your internet connection and try again.
-        goto :end
+        goto :done
     )
 )
 
@@ -119,7 +119,11 @@ set "PROJECT_DIR=!INSTALL_DIR!"
 echo   [OK] Repository ready at !PROJECT_DIR!
 
 :have_repo
-pushd "!PROJECT_DIR!"
+pushd "!PROJECT_DIR!" >nul 2>&1
+if errorlevel 1 (
+    echo [ERR] Could not access repository directory: !PROJECT_DIR!
+    goto :done
+)
 
 :: ── Detect existing install ─────────────────────────────────────────────
 
@@ -141,6 +145,10 @@ echo   [3] Reconfigure     (re-run channel/workspace setup only)
 echo   [4] Exit
 echo.
 set /p "CHOICE=Choose an option (1-4): "
+if "!CHOICE!"=="" (
+    echo   No option entered. Defaulting to [2] Repair.
+    set "CHOICE=2"
+)
 
 if "!CHOICE!"=="1" (
     echo   Removing existing venv and .env...
@@ -158,8 +166,8 @@ if "!CHOICE!"=="2" (
 )
 if "!CHOICE!"=="3" (
     echo   Jumping to configuration...
-    if exist ".venv\Scripts\activate.bat" call ".venv\Scripts\activate.bat"
-    python scripts\configure.py --reconfigure
+    if exist "!PROJECT_DIR!\.venv\Scripts\activate.bat" call "!PROJECT_DIR!\.venv\Scripts\activate.bat"
+    python "!PROJECT_DIR!\scripts\configure.py" --reconfigure
     echo   [OK] Reconfiguration complete.
     goto :done
 )
@@ -346,7 +354,7 @@ if not exist ".venv" (
 )
 
 echo   Activating .venv...
-call ".venv\Scripts\activate.bat"
+call "!PROJECT_DIR!\.venv\Scripts\activate.bat"
 
 echo   Installing COpenClaw and dependencies...
 pip install -e . --quiet >nul 2>&1
@@ -366,7 +374,7 @@ echo.
 echo [4/6] Running interactive configuration...
 echo.
 
-python scripts\configure.py
+python "!PROJECT_DIR!\scripts\configure.py"
 if errorlevel 1 (
     echo [ERR] Configuration script failed.
     goto :done
@@ -376,8 +384,8 @@ if errorlevel 1 (
 python -c "from copenclaw.core.disclaimer import record_acceptance; record_acceptance()" >nul 2>&1
 
 :: Optional: auto-provision Microsoft Teams bot if admin credentials are available
-if exist ".env" (
-    for /f "usebackq tokens=1,* delims==" %%a in (".env") do (
+if exist "!PROJECT_DIR!\.env" (
+    for /f "usebackq tokens=1,* delims==" %%a in ("!PROJECT_DIR!\.env") do (
         if not "%%a"=="" if not "%%a:~0,1"=="#" set "%%a=%%b"
     )
 )
@@ -391,7 +399,7 @@ if "!AUTO_TEAMS_SETUP!"=="true" (
     if defined MSTEAMS_ADMIN_TENANT_ID if defined MSTEAMS_ADMIN_CLIENT_ID if defined MSTEAMS_ADMIN_CLIENT_SECRET if defined MSTEAMS_AZURE_SUBSCRIPTION_ID if defined MSTEAMS_AZURE_RESOURCE_GROUP if defined MSTEAMS_BOT_ENDPOINT (
         if not defined MSTEAMS_APP_ID if not defined MSTEAMS_APP_PASSWORD if not defined MSTEAMS_TENANT_ID (
             echo   Auto-provisioning Microsoft Teams bot...
-            ".venv\Scripts\python.exe" -m copenclaw.cli teams-setup --messaging-endpoint "!MSTEAMS_BOT_ENDPOINT!" --write-env ".env"
+            "!PROJECT_DIR!\.venv\Scripts\python.exe" -m copenclaw.cli teams-setup --messaging-endpoint "!MSTEAMS_BOT_ENDPOINT!" --write-env "!PROJECT_DIR!\.env"
             if errorlevel 1 (
                 echo   [!!] Teams auto-provisioning failed. Run 'copenclaw teams-setup' manually.
             ) else (

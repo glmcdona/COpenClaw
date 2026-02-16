@@ -59,9 +59,9 @@ Run `copenclaw update` or send `/update` in chat to check for upstream changes a
 
 No need to clone the repo first — the installer does it for you:
 
-**Windows** (open Command Prompt):
+**Windows** (open Command Prompt or PowerShell):
 ```cmd
-curl -o install.bat https://raw.githubusercontent.com/glmcdona/copenclaw/main/install.bat && install.bat
+curl -o install.bat https://raw.githubusercontent.com/glmcdona/copenclaw/main/install.bat && .\install.bat
 ```
 
 **Linux / macOS** (open a terminal):
