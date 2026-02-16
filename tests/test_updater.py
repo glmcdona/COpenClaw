@@ -41,6 +41,16 @@ def test_format_update_check_with_info():
     assert "src/foo.py" in result
     assert "/update apply" in result
 
+@patch("copenclaw.core.updater._is_windows", return_value=True)
+def test_format_update_check_windows_note(mock_windows):
+    info = UpdateInfo(
+        commits_behind=1,
+        current_hash="abc123",
+        remote_hash="def456",
+    )
+    result = format_update_check(info)
+    assert "copenclaw.exe" in result.lower()
+
 def test_format_update_check_with_conflicts():
     info = UpdateInfo(
         commits_behind=1,
@@ -96,6 +106,17 @@ def test_format_update_result_success():
     assert "successfully" in text.lower() or "✅" in text
     assert "abc123" in text
     assert "def456" in text
+    assert "/restart" in text
+
+def test_format_update_result_success_deferred():
+    result = UpdateResult(
+        success=True,
+        old_hash="abc123",
+        new_hash="def456",
+        install_deferred=True,
+    )
+    text = format_update_result(result)
+    assert "queued" in text.lower()
     assert "/restart" in text
 
 def test_format_update_result_failure():
@@ -211,10 +232,11 @@ def test_check_for_updates_not_git_repo(mock_is_git):
 # ── apply_update ─────────────────────────────────────────────────
 
 @patch("copenclaw.core.updater._get_default_branch", return_value="main")
+@patch("copenclaw.core.updater._is_windows", return_value=False)
 @patch("copenclaw.core.updater.get_current_hash")
 @patch("copenclaw.core.updater._run_git")
 @patch("subprocess.run")
-def test_apply_update_success(mock_subprocess, mock_run_git, mock_hash, mock_branch):
+def test_apply_update_success(mock_subprocess, mock_run_git, mock_hash, mock_windows, mock_branch):
     mock_hash.side_effect = ["aaa111aaa111", "bbb222bbb222"]
     mock_run_git.return_value = MagicMock(returncode=0, stdout="")
     # pip install
@@ -224,6 +246,38 @@ def test_apply_update_success(mock_subprocess, mock_run_git, mock_hash, mock_bra
     assert result.success is True
     assert result.old_hash == "aaa111aaa111"
     assert result.new_hash == "bbb222bbb222"
+
+@patch("copenclaw.core.updater._get_default_branch", return_value="main")
+@patch("copenclaw.core.updater._schedule_windows_reinstall", return_value=(True, ""))
+@patch("copenclaw.core.updater._is_windows", return_value=True)
+@patch("copenclaw.core.updater.get_current_hash")
+@patch("copenclaw.core.updater._run_git")
+@patch("subprocess.run")
+def test_apply_update_windows_deferred(
+    mock_subprocess, mock_run_git, mock_hash, mock_windows, mock_schedule, mock_branch
+):
+    mock_hash.side_effect = ["aaa111aaa111", "bbb222bbb222"]
+    mock_run_git.return_value = MagicMock(returncode=0, stdout="")
+
+    result = apply_update("/fake")
+    assert result.success is True
+    assert result.install_deferred is True
+    mock_subprocess.assert_not_called()
+
+@patch("copenclaw.core.updater._get_default_branch", return_value="main")
+@patch("copenclaw.core.updater._schedule_windows_reinstall", return_value=(False, "spawn failed"))
+@patch("copenclaw.core.updater._is_windows", return_value=True)
+@patch("copenclaw.core.updater.get_current_hash")
+@patch("copenclaw.core.updater._run_git")
+def test_apply_update_windows_deferred_setup_fails(
+    mock_run_git, mock_hash, mock_windows, mock_schedule, mock_branch
+):
+    mock_hash.side_effect = ["aaa111aaa111", "bbb222bbb222"]
+    mock_run_git.return_value = MagicMock(returncode=0, stdout="")
+
+    result = apply_update("/fake")
+    assert result.success is False
+    assert "setup failed" in result.error
 
 @patch("copenclaw.core.updater._get_default_branch", return_value="main")
 @patch("copenclaw.core.updater.get_current_hash", return_value="aaa111aaa111")

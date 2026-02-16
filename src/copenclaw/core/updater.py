@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import sys
 from dataclasses import dataclass, field
 
 logger = logging.getLogger("copenclaw.updater")
@@ -36,6 +37,7 @@ class UpdateResult:
     error: str = ""
     files_updated: list[str] = field(default_factory=list)
     pip_output: str = ""
+    install_deferred: bool = False
 
 
 def _run_git(repo_dir: str, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -57,6 +59,56 @@ def _resolve_repo_root() -> str:
         return os.path.abspath(env_root)
     here = os.path.abspath(os.path.dirname(__file__))
     return os.path.normpath(os.path.join(here, "..", "..", ".."))
+
+
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _schedule_windows_reinstall(repo_dir: str) -> tuple[bool, str]:
+    """Queue a detached pip reinstall after the current process exits."""
+    helper_code = (
+        "import ctypes\n"
+        "import os\n"
+        "import subprocess\n"
+        "import sys\n"
+        "parent_pid = int(sys.argv[1])\n"
+        "repo_dir = sys.argv[2]\n"
+        "kernel32 = ctypes.windll.kernel32\n"
+        "SYNCHRONIZE = 0x00100000\n"
+        "WAIT_TIMEOUT_MS = 300000\n"
+        "handle = kernel32.OpenProcess(SYNCHRONIZE, False, parent_pid)\n"
+        "if handle:\n"
+        "    kernel32.WaitForSingleObject(handle, WAIT_TIMEOUT_MS)\n"
+        "    kernel32.CloseHandle(handle)\n"
+        "result = subprocess.run(\n"
+        "    [sys.executable, '-m', 'pip', 'install', '-e', repo_dir, '--quiet'],\n"
+        "    capture_output=True,\n"
+        "    text=True,\n"
+        "    check=False,\n"
+        "    timeout=300,\n"
+        ")\n"
+        "output = (result.stdout or '') + (result.stderr or '')\n"
+        "with open(os.path.join(repo_dir, '.copenclaw-update.log'), 'w', encoding='utf-8') as fh:\n"
+        "    fh.write(output)\n"
+        "sys.exit(result.returncode)\n"
+    )
+    creationflags = (
+        getattr(subprocess, "DETACHED_PROCESS", 0)
+        | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    )
+    try:
+        subprocess.Popen(
+            [sys.executable, "-c", helper_code, str(os.getpid()), repo_dir],
+            cwd=repo_dir,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creationflags,
+        )
+    except (OSError, ValueError, FileNotFoundError) as exc:
+        return False, str(exc)
+    return True, ""
 
 
 def is_git_repo(repo_dir: str | None = None) -> bool:
@@ -203,8 +255,30 @@ def apply_update(repo_dir: str | None = None) -> UpdateResult:
         )
         files_updated = [f for f in diff_result.stdout.strip().splitlines() if f]
 
-        # Reinstall the package
         pip_output = ""
+        if _is_windows():
+            queued, queue_error = _schedule_windows_reinstall(repo_dir)
+            if not queued:
+                return UpdateResult(
+                    success=False,
+                    old_hash=old_hash[:12],
+                    new_hash=new_hash[:12],
+                    error=f"pip install setup failed: {queue_error}",
+                    files_updated=files_updated,
+                )
+            logger.info(
+                "Windows update staged: %s -> %s (%d files changed)",
+                old_hash[:12], new_hash[:12], len(files_updated),
+            )
+            return UpdateResult(
+                success=True,
+                old_hash=old_hash[:12],
+                new_hash=new_hash[:12],
+                files_updated=files_updated,
+                pip_output="Windows deferred pip install queued.",
+                install_deferred=True,
+            )
+        # Reinstall the package
         try:
             pip_result = subprocess.run(
                 ["pip", "install", "-e", repo_dir, "--quiet"],
@@ -275,11 +349,17 @@ def format_update_check(info: UpdateInfo | None) -> str:
         for f in info.conflict_files:
             lines.append(f"  • `{f}`")
         lines.append("\nThese are uncommitted edits in your repo that touch the same files.")
-        lines.append("Updating would overwrite those edits unless you stash or commit them first.")
+        lines.append("These edits may be overwritten unless you stash or commit them first.")
     elif info.locally_modified:
         lines.append(
             f"\n📝 You have {len(info.locally_modified)} locally modified file(s) "
             "(uncommitted changes), but none overlap this update."
+        )
+    if _is_windows():
+        lines.append(
+            "\n🪟 On Windows, `/update apply` stages code changes now and queues "
+            "the pip reinstall to run after COpenClaw exits, so `copenclaw.exe` "
+            "is not replaced while in use."
         )
 
     lines.append("\nUse `/update apply` to apply the update.")
@@ -305,7 +385,14 @@ def format_update_result(result: UpdateResult) -> str:
         if len(result.files_updated) > 15:
             lines.append(f"  … and {len(result.files_updated) - 15} more")
 
-    lines.append("\n🔄 Restart COpenClaw to load the new code: `/restart`")
+    if result.install_deferred:
+        lines.append(
+            "\n🪟 Windows finalize step: pip reinstall is queued and will start after "
+            "COpenClaw exits."
+        )
+        lines.append("Run `/restart` now so the queued update can finish.")
+    else:
+        lines.append("\n🔄 Restart COpenClaw to load the new code: `/restart`")
 
     return "\n".join(lines)
 

@@ -101,7 +101,10 @@ def update(
     typer.echo(format_update_result(result))
 
     if result.success:
-        typer.echo("\nRestart COpenClaw to load the new code.")
+        if result.install_deferred:
+            typer.echo("\nWindows finalize step queued; restart COpenClaw now to complete the update.")
+        else:
+            typer.echo("\nRestart COpenClaw to load the new code.")
 
 
 @app.command()
