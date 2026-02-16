@@ -1298,6 +1298,7 @@ class MCPProtocolHandler:
             def on_supervisor_output(task_id: str, output: str) -> None:
                 tm.append_log(task_id, f"\n--- SUPERVISOR CHECK ---\n{output}")
 
+            # Use the same prompt for supervisor as was used for worker
             pool.start_supervisor(
                 task_id=task.task_id,
                 prompt=worker_prompt,
@@ -1319,7 +1320,7 @@ class MCPProtocolHandler:
                     "continuous tick mechanism will not run.",
                     getattr(task, "task_id", "<unknown>"),
                 )
-        self._schedule_continuous_ticks(task)
+            self._schedule_continuous_ticks(task)
 
         return {
             "task_id": task.task_id,

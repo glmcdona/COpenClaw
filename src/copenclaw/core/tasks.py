@@ -369,6 +369,11 @@ class TaskManager:
                 self._ci_locks[task_id] = lock
             return lock
 
+    def _cleanup_ci_lock(self, task_id: str) -> None:
+        """Remove the CI lock for a task to prevent memory leak."""
+        with self._save_lock:
+            self._ci_locks.pop(task_id, None)
+
     @staticmethod
     def _normalize_positive_int(value: Any, default: int) -> int:
         try:
@@ -393,12 +398,14 @@ class TaskManager:
         ):
             cfg[key] = self._normalize_positive_int(source.get(key), int(cfg[key]))
 
+        # Deep merge nested sections to preserve default values not overridden by user
         for section in ("quality_gate", "retry_policy", "safety"):
             src_section = source.get(section)
             if isinstance(src_section, dict):
                 cfg_section = cfg[section]
                 if isinstance(cfg_section, dict):
-                    cfg_section.update(src_section)
+                    for key, value in src_section.items():
+                        cfg_section[key] = value
 
         if not isinstance(cfg.get("safety", {}).get("require_human_approval_on"), list):
             cfg["safety"]["require_human_approval_on"] = list(_CI_DEFAULT_CONFIG["safety"]["require_human_approval_on"])
@@ -890,6 +897,9 @@ class TaskManager:
         task.updated_at = _now()
         if status in ("completed", "failed", "cancelled"):
             task.completed_at = _now()
+            # Clean up CI lock for terminal states to prevent memory leak
+            if task.task_type == "continuous_improvement":
+                self._cleanup_ci_lock(task_id)
         task.add_timeline("status_change", f"{old} → {status}")
         self._save()
         return task
@@ -942,6 +952,9 @@ class TaskManager:
     def clear_all(self) -> int:
         """Remove all tasks. Returns the number of tasks cleared."""
         count = len(self._tasks)
+        # Clean up all CI locks before clearing tasks
+        for task_id in list(self._tasks.keys()):
+            self._cleanup_ci_lock(task_id)
         self._tasks.clear()
         self._save()
         return count
