@@ -398,7 +398,10 @@ class TaskManager:
         ):
             cfg[key] = self._normalize_positive_int(source.get(key), int(cfg[key]))
 
-        # Deep merge nested sections to preserve default values not overridden by user
+        # Merge nested sections: only override keys present in source,
+        # preserving default values for keys not provided by user.
+        # This avoids the shallow merge problem where dict.update() would
+        # replace the entire nested dict, losing sibling keys.
         for section in ("quality_gate", "retry_policy", "safety"):
             src_section = source.get(section)
             if isinstance(src_section, dict):
@@ -690,14 +693,14 @@ class TaskManager:
         }
         paths = self._ci_paths(task)
         lock = self._ci_lock(task.task_id)
-        
+
         # Write iteration log and checkpoint within the same critical section
         # to maintain ordering consistency between iterations.jsonl and checkpoints.jsonl
         with lock:
             self._append_jsonl(paths["iterations"], iter_record)
-            
+
             force_type = self._apply_ci_limits(task, data)
-            
+
             should_checkpoint = bool(data.get("checkpoint")) or msg_type in {"completed", "failed"} or force_type in {"completed", "failed", "needs_input"}
             if should_checkpoint:
                 reason = data.get("checkpoint_reason", summary[:160] or msg_type)
@@ -799,13 +802,13 @@ class TaskManager:
             "max_consecutive_failures",
             "max_no_improvement_iterations",
         )
-        
+
         for key in allowed_keys:
             if key in patch:
                 current_default = self._normalize_positive_int(task.ci_config.get(key), 1)
                 task.ci_config[key] = self._normalize_positive_int(patch[key], current_default)
                 updated = True
-        
+
         # Log any unrecognized budget keys so misconfigurations are visible
         unknown_keys = set(patch.keys()) - set(allowed_keys)
         if unknown_keys:
@@ -814,7 +817,7 @@ class TaskManager:
                 getattr(task, "task_id", "<unknown>"),
                 ", ".join(sorted(str(k) for k in unknown_keys)),
             )
-        
+
         if not updated:
             raise ValueError("priority budget patch did not include any supported budget keys")
         task.updated_at = _now()
