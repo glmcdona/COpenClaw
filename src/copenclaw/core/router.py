@@ -394,7 +394,20 @@ def handle_chat(
     try:
         output = cli.run_prompt(prompt_with_reminder, resume_id=copilot_sid)
     except CopilotCliError as exc:
-        output = f"Error: {exc}"
+        # If a previously stored resume session is stale (for example after a
+        # crashed Copilot CLI process), clear it and retry once without resume.
+        had_resume = bool(copilot_sid or cli.resume_session_id)
+        if had_resume:
+            logger.warning("Copilot CLI resume failed for %s; retrying without resume: %s", session_key, exc)
+            if copilot_sid:
+                sessions.clear_copilot_session_id(session_key)
+            cli.resume_session_id = None
+            try:
+                output = cli.run_prompt(prompt_with_reminder, resume_id=None)
+            except CopilotCliError as retry_exc:
+                output = f"Error: {retry_exc}"
+        else:
+            output = f"Error: {exc}"
 
     # After the prompt completes, discover the session ID so we can
     # resume this conversation next time.  We always try to discover

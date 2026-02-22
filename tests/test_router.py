@@ -7,7 +7,7 @@ from copenclaw.core.router import ChatRequest, ChatResponse, handle_chat
 from copenclaw.core.scheduler import Scheduler
 from copenclaw.core.session import SessionStore
 from copenclaw.core.tasks import TaskManager
-from copenclaw.integrations.copilot_cli import CopilotCli
+from copenclaw.integrations.copilot_cli import CopilotCli, CopilotCliError
 from copenclaw.integrations.telegram import TelegramAdapter
 
 def _make_deps(
@@ -111,6 +111,31 @@ def test_freetext_calls_copilot(monkeypatch) -> None:
         # First message has no history, so prompt is passed through as-is
         # (delegation reminder suffix is appended but the core prompt is there)
         assert resp.text.startswith("echo:explain quantum computing")
+
+def test_freetext_recovers_from_stale_resume_session(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        deps = _make_deps(tmpdir)
+        session_key = "telegram:dm:42"
+        deps["sessions"].set_copilot_session_id(session_key, "stale-session-id")
+
+        calls = {"count": 0}
+
+        def flaky_run(prompt, **kw):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise CopilotCliError("copilot CLI failed with exit code 1")
+            assert kw.get("resume_id") is None
+            return "recovered"
+
+        monkeypatch.setattr(deps["cli"], "run_prompt", flaky_run)
+        monkeypatch.setattr(deps["cli"], "_discover_latest_session_id", lambda: None)
+
+        req = ChatRequest(channel="telegram", sender_id="42", chat_id="100", text="status")
+        resp = handle_chat(req, **deps)
+
+        assert resp.text == "recovered"
+        assert calls["count"] == 2
+        assert deps["sessions"].get_copilot_session_id(session_key) is None
 
 def test_telegram_ping_back_schedules_and_delivers(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
