@@ -386,6 +386,51 @@ class TestSupervisorLifecycle:
         assert len(output_lines) >= 1
         assert not supervisor.is_running
 
+    @patch("copenclaw.integrations.copilot_cli.CopilotCli.run_prompt")
+    @patch("copenclaw.integrations.copilot_cli.shutil.which", return_value="copilot")
+    def test_supervisor_handles_multiple_triggers_without_autopilot(self, mock_which, mock_run, tmp_path):
+        """Supervisor should run one bounded check per trigger (non-autopilot)."""
+        working_dir = str(tmp_path / "work")
+        os.makedirs(working_dir)
+
+        first_check = threading.Event()
+        second_check = threading.Event()
+        call_count = {"value": 0}
+
+        def _fake_run(*args, **kwargs):
+            call_count["value"] += 1
+            if call_count["value"] == 1:
+                first_check.set()
+            elif call_count["value"] == 2:
+                second_check.set()
+            return "check complete"
+
+        mock_run.side_effect = _fake_run
+
+        supervisor = SupervisorThread(
+            task_id="task-sup3",
+            prompt="Check task",
+            worker_session_id=None,
+            mcp_server_url="http://127.0.0.1:18790/mcp",
+            check_interval=300,
+            timeout=5,
+            working_dir=working_dir,
+        )
+        supervisor.start()
+        try:
+            supervisor.request_check()
+            assert first_check.wait(timeout=3)
+
+            supervisor.request_check()
+            assert second_check.wait(timeout=3)
+        finally:
+            supervisor.stop()
+            supervisor._thread.join(timeout=10)
+
+        assert mock_run.call_count >= 2
+        for call in mock_run.call_args_list:
+            assert call.kwargs.get("autopilot") is False
+
 
 # ── Test: WorkerPool ─────────────────────────────────────────
 
@@ -433,6 +478,26 @@ class TestWorkerPool:
         status = pool.status()
         assert "workers" in status
         assert "supervisors" in status
+
+    @patch.object(SupervisorThread, "start", autospec=True)
+    def test_pool_start_supervisor_caps_timeout_to_check_interval(self, mock_start, tmp_path):
+        working_dir = str(tmp_path / "work")
+        os.makedirs(working_dir)
+        os.makedirs(os.path.join(working_dir, "workspace"), exist_ok=True)
+
+        pool = WorkerPool(
+            mcp_server_url="http://127.0.0.1:18790/mcp",
+            supervisor_timeout=7200,
+        )
+        supervisor = pool.start_supervisor(
+            task_id="task-sup-timeout",
+            prompt="Monitor progress",
+            check_interval=300,
+            working_dir=working_dir,
+        )
+
+        assert supervisor.timeout == 300
+        assert pool.get_supervisor("task-sup-timeout") is supervisor
 
     @patch("copenclaw.core.worker.subprocess.Popen")
     @patch("copenclaw.integrations.copilot_cli.shutil.which", return_value="copilot")

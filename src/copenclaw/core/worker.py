@@ -958,6 +958,7 @@ class SupervisorThread:
                     trigger,
                     log_prefix=f"SUPERVISOR {self.task_id[:12]}",
                     resume_id=self._session_id,
+                    autopilot=False,
                 )
 
                 # Always re-discover session ID (may change between checks)
@@ -1065,6 +1066,12 @@ class WorkerPool:
             if task_id in self._supervisors and self._supervisors[task_id].is_running:
                 raise RuntimeError(f"Supervisor already running for task {task_id}")
 
+            effective_timeout = self.supervisor_timeout
+            if effective_timeout > 0 and check_interval > 0:
+                # Keep each supervisor check bounded so periodic monitoring
+                # can continue at the configured cadence.
+                effective_timeout = min(effective_timeout, max(5, check_interval))
+
             supervisor = SupervisorThread(
                 task_id=task_id,
                 prompt=prompt,
@@ -1073,7 +1080,7 @@ class WorkerPool:
                 mcp_token=self.mcp_token,
                 check_interval=check_interval,
                 on_output=on_output,
-                timeout=self.supervisor_timeout,
+                timeout=effective_timeout,
                 supervisor_instructions=supervisor_instructions,
                 working_dir=working_dir,
                 root_workspace_dir=self.root_workspace_dir,

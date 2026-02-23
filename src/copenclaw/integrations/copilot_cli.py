@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -566,15 +567,25 @@ class CopilotCli:
             raise CopilotCliError(f"copilot CLI not found: {exc}") from exc
 
         output_lines: list[str] = []
-        start_time = time.monotonic()
         early_stopped = False
+        timed_out = False
+        timeout_timer: Optional[threading.Timer] = None
+        if self.timeout and self.timeout > 0:
+            def _on_timeout() -> None:
+                nonlocal timed_out
+                timed_out = True
+                if process.poll() is None:
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+
+            timeout_timer = threading.Timer(self.timeout, _on_timeout)
+            timeout_timer.daemon = True
+            timeout_timer.start()
         try:
             assert process.stdout is not None
             for line in process.stdout:
-                elapsed = time.monotonic() - start_time
-                if elapsed > self.timeout:
-                    process.kill()
-                    raise CopilotCliError(f"copilot CLI timed out after {self.timeout}s")
                 output_lines.append(line)
                 self._log_line(line, prefix=log_prefix)
                 if on_line:
@@ -594,8 +605,13 @@ class CopilotCli:
         except Exception as exc:
             process.kill()
             raise CopilotCliError(f"copilot CLI error: {exc}") from exc
+        finally:
+            if timeout_timer:
+                timeout_timer.cancel()
 
         output = "".join(output_lines).strip()
+        if timed_out:
+            raise CopilotCliError(f"copilot CLI timed out after {self.timeout}s")
         if process.returncode != 0 and not early_stopped:
             if allow_retry and not self._subcommand and self._should_retry_with_chat(output):
                 logger.warning("copilot CLI rejected args; retrying with 'chat' subcommand")
