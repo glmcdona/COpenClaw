@@ -635,6 +635,41 @@ def create_app() -> FastAPI:
 
     # ---- scheduler loop ----
 
+    def _capture_worker_process_state(task) -> dict[str, Any]:  # noqa: ANN001
+        now = datetime.now(timezone.utc)
+        state: dict[str, Any] = {
+            "pid": getattr(task, "worker_pid", None),
+            "child_pids": list(getattr(task, "worker_child_pids", []) or []),
+            "active_pids": [],
+            "running": False,
+            "observed_at": now,
+        }
+        worker = worker_pool.get_worker(task.task_id) if worker_pool else None
+        if worker:
+            snapshot = worker.process_snapshot() if hasattr(worker, "process_snapshot") else {}
+            state["pid"] = snapshot.get("pid", state["pid"])
+            state["child_pids"] = [int(p) for p in snapshot.get("child_pids", []) if isinstance(p, int)]
+            state["active_pids"] = [int(p) for p in snapshot.get("active_pids", []) if isinstance(p, int)]
+            state["running"] = bool(snapshot.get("running")) or worker.is_running
+            observed = snapshot.get("observed_at")
+            state["observed_at"] = observed if isinstance(observed, datetime) else now
+
+        should_save = (
+            getattr(task, "worker_pid", None) != state["pid"]
+            or list(getattr(task, "worker_child_pids", []) or []) != state["child_pids"]
+            or bool(getattr(task, "worker_process_running", False)) != bool(state["running"])
+            or not getattr(task, "worker_process_observed_at", None)
+            or (state["observed_at"] - getattr(task, "worker_process_observed_at", state["observed_at"])).total_seconds() >= 30
+        )
+        if should_save:
+            task.worker_pid = state["pid"]
+            task.worker_child_pids = state["child_pids"]
+            task.worker_process_running = bool(state["running"])
+            task.worker_process_observed_at = state["observed_at"]
+            task.updated_at = now
+            task_manager._save()
+        return state
+
     def _deliver_job(job) -> tuple[str, bool]:  # noqa: ANN001
         """Attempt to deliver a single job."""
         payload_type = job.payload.get("type")
@@ -648,8 +683,21 @@ def create_app() -> FastAPI:
             if not task.auto_supervise:
                 scheduler.cancel(job.job_id)
                 return "cancelled", False
-            requested = worker_pool.request_supervisor_check(task_id) if worker_pool else False
-            status = "requested" if requested else "missing_supervisor"
+            process_state = _capture_worker_process_state(task)
+            worker_running = bool(process_state.get("running"))
+            idle_anchor = task.last_worker_activity_at or task.updated_at or task.created_at
+            if getattr(task, "watchdog_last_action_at", None) and task.watchdog_last_action_at > idle_anchor:
+                idle_anchor = task.watchdog_last_action_at
+            if idle_anchor.tzinfo is None:
+                idle_anchor = idle_anchor.replace(tzinfo=timezone.utc)
+            idle_secs = max(0, int((datetime.now(timezone.utc) - idle_anchor).total_seconds()))
+            stall_threshold = max(int(task.check_interval) * 3, int(settings.task_watchdog_idle_warn_seconds))
+            should_request = bool(task.completion_deferred) or (not worker_running) or idle_secs >= stall_threshold
+            if should_request:
+                requested = worker_pool.request_supervisor_check(task_id) if worker_pool else False
+                status = "requested" if requested else "missing_supervisor"
+            else:
+                status = "skipped_healthy"
             if repeat_seconds > 0:
                 scheduler.reschedule(job.job_id, datetime.utcnow() + timedelta(seconds=repeat_seconds))
                 return status, True
@@ -1553,7 +1601,13 @@ def create_app() -> FastAPI:
             last = last.replace(tzinfo=timezone.utc)
         return max(0, int((now - last).total_seconds()))
 
-    def _record_watchdog_report(task, msg_type: str, summary: str, detail: str = "") -> None:  # noqa: ANN001
+    def _record_watchdog_report(  # noqa: ANN001
+        task,
+        msg_type: str,
+        summary: str,
+        detail: str = "",
+        notify_user: bool = False,
+    ) -> None:
         msg = task_manager.handle_report(
             task_id=task.task_id,
             msg_type=msg_type,
@@ -1561,7 +1615,7 @@ def create_app() -> FastAPI:
             detail=detail,
             from_tier="orchestrator",
         )
-        if msg and msg_type == "needs_input":
+        if msg and (msg_type == "needs_input" or notify_user):
             mcp_handler._notify_user_about_task(task.task_id, msg)
         if settings.data_dir:
             log_event(settings.data_dir, "task.watchdog", {
@@ -1577,9 +1631,13 @@ def create_app() -> FastAPI:
         restart_after = max(0, int(settings.task_watchdog_idle_restart_seconds))
         grace = max(0, int(settings.task_watchdog_grace_seconds))
         max_restarts = max(0, int(settings.task_watchdog_max_restarts))
+        progress_interval = max(interval, int(getattr(settings, "task_progress_report_interval_seconds", 900)))
         if warn_after <= 0 and restart_after <= 0:
-            logger.info("Task watchdog disabled (warn=%s restart=%s)", warn_after, restart_after)
-            return
+            logger.info(
+                "Task watchdog interventions disabled (warn=%s restart=%s); periodic progress heartbeats remain active",
+                warn_after,
+                restart_after,
+            )
         if restart_after and warn_after and restart_after < warn_after:
             restart_after = warn_after
 
@@ -1592,14 +1650,35 @@ def create_app() -> FastAPI:
                     if task.completion_deferred:
                         continue
 
-                    worker = worker_pool.get_worker(task.task_id) if worker_pool else None
-                    worker_running = worker.is_running if worker else False
+                    process_state = _capture_worker_process_state(task)
+                    worker_running = bool(process_state.get("running"))
+                    child_count = len(process_state.get("child_pids", []))
                     idle_secs = _watchdog_idle_seconds(task, now)
+
+                    if worker_running:
+                        progress_msg = task_manager.maybe_record_periodic_progress(
+                            task.task_id,
+                            summary="Task heartbeat: still running",
+                            detail=(
+                                f"Last MCP activity: {idle_secs}s ago. "
+                                f"PID: {process_state.get('pid') or 'unknown'}. "
+                                f"Active processes: {len(process_state.get('active_pids', []))} "
+                                f"(children: {child_count})."
+                            ),
+                            interval_seconds=progress_interval,
+                            from_tier="orchestrator",
+                            now=now,
+                        )
+                        if progress_msg:
+                            mcp_handler._notify_user_about_task(task.task_id, progress_msg)
+
+                    if warn_after <= 0 and restart_after <= 0:
+                        continue
                     if idle_secs < grace:
                         continue
 
                     if worker_running:
-                        if warn_after and idle_secs >= warn_after and task.watchdog_state == "none":
+                        if warn_after and idle_secs >= warn_after and task.watchdog_state == "none" and child_count == 0:
                             msg = (
                                 "Watchdog notice: no MCP activity detected. "
                                 "If you are stuck on a blocking command, abort it and report status."
@@ -1623,7 +1702,7 @@ def create_app() -> FastAPI:
                                 worker_pool.request_supervisor_check(task.task_id)
                             continue
 
-                        if restart_after and idle_secs >= restart_after:
+                        if restart_after and idle_secs >= restart_after and child_count == 0:
                             if task.watchdog_restart_count < max_restarts:
                                 _record_watchdog_report(
                                     task,

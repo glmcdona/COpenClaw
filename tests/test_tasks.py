@@ -1,6 +1,7 @@
 """Tests for task dispatch, lifecycle, and bidirectional ITC protocol."""
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import os
 import json
 import tempfile
@@ -37,6 +38,7 @@ class TestTaskCreation:
         assert task.name == "Build app"
         assert task.prompt == "Create a todo app"
         assert task.status == "pending"
+        assert task.check_interval == 600
         assert len(task.timeline) == 1
         assert task.timeline[0].event == "created"
 
@@ -369,6 +371,22 @@ class TestNotification:
         task = tm.create_task(name="A", prompt="a")
         msg = tm.handle_report(task.task_id, "progress", "Just a checkpoint")
         assert tm.should_notify_user(msg) is False
+
+    def test_periodic_progress_cadence(self, tm):
+        task = tm.create_task(name="A", prompt="a")
+        tm.update_status(task.task_id, "running")
+
+        first = tm.maybe_record_periodic_progress(task.task_id, "Heartbeat", interval_seconds=600)
+        assert first is not None
+        second = tm.maybe_record_periodic_progress(task.task_id, "Heartbeat", interval_seconds=600)
+        assert second is None
+
+        updated = tm.get(task.task_id)
+        updated.last_progress_report_at = datetime.now(timezone.utc) - timedelta(seconds=601)
+        tm._save()
+
+        third = tm.maybe_record_periodic_progress(task.task_id, "Heartbeat", interval_seconds=600)
+        assert third is not None
 
 
 # ── Timeline ─────────────────────────────────────────────────

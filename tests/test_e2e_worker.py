@@ -11,6 +11,7 @@ needing the actual CLI installed. Tests cover:
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import io
 import os
 import subprocess
@@ -311,6 +312,29 @@ class TestWorkerLifecycle:
 
         assert not worker.is_running
 
+    def test_worker_process_snapshot_tracks_pid_and_children(self, tmp_path):
+        working_dir = str(tmp_path / "work")
+        os.makedirs(working_dir)
+        worker = WorkerThread(
+            task_id="task-proc",
+            prompt="Track process tree",
+            working_dir=working_dir,
+            mcp_server_url="http://127.0.0.1:18790/mcp",
+        )
+        fake_process = MagicMock()
+        fake_process.pid = 43210
+        fake_process.poll.return_value = None
+        worker._process = fake_process
+        worker._last_pid = 43210
+
+        with patch("copenclaw.core.worker._collect_child_processes", return_value=[43211, 43212]):
+            snapshot = worker.process_snapshot()
+
+        assert snapshot["pid"] == 43210
+        assert snapshot["child_pids"] == [43211, 43212]
+        assert snapshot["running"] is True
+        assert 43210 in snapshot["active_pids"]
+
 
 # ── Test: SupervisorThread lifecycle ─────────────────────────
 
@@ -430,6 +454,76 @@ class TestSupervisorLifecycle:
         assert mock_run.call_count >= 2
         for call in mock_run.call_args_list:
             assert call.kwargs.get("autopilot") is False
+
+    def test_supervisor_prompt_stays_passive_with_active_process_tree(self, tmp_path):
+        data_dir = str(tmp_path / "data")
+        os.makedirs(data_dir)
+        tm = TaskManager(data_dir=data_dir)
+        task = tm.create_task(name="Passive", prompt="test", auto_supervise=True, check_interval=300)
+        tm.update_status(task.task_id, "running")
+        task.last_worker_activity_at = datetime.now(timezone.utc) - timedelta(seconds=420)
+        tm._save()
+
+        worker = MagicMock()
+        worker.is_running = True
+        worker.process_snapshot.return_value = {
+            "pid": 1001,
+            "child_pids": [1002, 1003],
+            "active_pids": [1001, 1002, 1003],
+            "running": True,
+        }
+        pool = MagicMock()
+        pool.get_worker.return_value = worker
+
+        supervisor = SupervisorThread(
+            task_id=task.task_id,
+            prompt="Check task",
+            worker_session_id=None,
+            mcp_server_url="http://127.0.0.1:18790/mcp",
+            check_interval=300,
+            timeout=5,
+            task_manager=tm,
+            worker_pool=pool,
+        )
+
+        trigger = supervisor._build_trigger_prompt(check_count=1)
+        assert "Monitor passively" in trigger
+        assert "do NOT send assessment/intervention" in trigger
+
+    def test_supervisor_prompt_escalates_after_stall_threshold(self, tmp_path):
+        data_dir = str(tmp_path / "data")
+        os.makedirs(data_dir)
+        tm = TaskManager(data_dir=data_dir)
+        task = tm.create_task(name="Stalled", prompt="test", auto_supervise=True, check_interval=300)
+        tm.update_status(task.task_id, "running")
+        task.last_worker_activity_at = datetime.now(timezone.utc) - timedelta(seconds=1800)
+        tm._save()
+
+        worker = MagicMock()
+        worker.is_running = True
+        worker.process_snapshot.return_value = {
+            "pid": 2001,
+            "child_pids": [],
+            "active_pids": [2001],
+            "running": True,
+        }
+        pool = MagicMock()
+        pool.get_worker.return_value = worker
+
+        supervisor = SupervisorThread(
+            task_id=task.task_id,
+            prompt="Check task",
+            worker_session_id=None,
+            mcp_server_url="http://127.0.0.1:18790/mcp",
+            check_interval=300,
+            timeout=5,
+            task_manager=tm,
+            worker_pool=pool,
+        )
+
+        trigger = supervisor._build_trigger_prompt(check_count=1)
+        assert "STUCK" in trigger
+        assert "type='intervention'" in trigger
 
 
 # ── Test: WorkerPool ─────────────────────────────────────────
