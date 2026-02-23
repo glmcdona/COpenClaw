@@ -174,6 +174,97 @@ def _format_age(ts: datetime | None) -> str:
     days = hours // 24
     return f"{days}d ago"
 
+
+def _normalize_progress_text(text: str, *, limit: int = 120) -> str:
+    compact = " ".join((text or "").split())
+    if not compact:
+        return ""
+    return _compact(compact, limit=limit)
+
+
+def _build_watchdog_progress_update(  # noqa: ANN001
+    task,
+    process_state: dict[str, Any],
+    *,
+    now: datetime,
+) -> tuple[str, str]:
+    since = getattr(task, "last_progress_report_at", None)
+    current_activity = ""
+    for msg in reversed(getattr(task, "outbox", [])):
+        if getattr(msg, "direction", "") != "up":
+            continue
+        if getattr(msg, "from_tier", "") != "worker":
+            continue
+        if getattr(msg, "msg_type", "") not in {"progress", "artifact", "question", "needs_input"}:
+            continue
+        candidate = _normalize_progress_text(getattr(msg, "content", ""), limit=100)
+        if not candidate:
+            continue
+        candidate_lower = candidate.lower()
+        if candidate_lower.startswith("task heartbeat:") or candidate_lower.startswith("watchdog"):
+            continue
+        current_activity = candidate
+        break
+    if not current_activity:
+        current_activity = "No fresh worker status text yet"
+
+    completed_items: list[str] = []
+    seen_completed: set[str] = set()
+    for entry in getattr(task, "timeline", []):
+        entry_ts = getattr(entry, "ts", None)
+        if since and isinstance(entry_ts, datetime) and entry_ts <= since:
+            continue
+        if getattr(entry, "event", "") not in {"checkpoint", "artifact", "supervised"}:
+            continue
+        candidate = _normalize_progress_text(getattr(entry, "summary", ""), limit=90)
+        if not candidate:
+            continue
+        candidate_lower = candidate.lower()
+        if candidate_lower.startswith("task heartbeat:") or candidate_lower.startswith("watchdog"):
+            continue
+        if candidate_lower in seen_completed:
+            continue
+        seen_completed.add(candidate_lower)
+        completed_items.append(candidate)
+    completed_work = "; ".join(completed_items[-2:]) if completed_items else "No new completed work since last update"
+
+    running = bool(process_state.get("running"))
+    child_pids = process_state.get("child_pids", []) or []
+    active_pids = process_state.get("active_pids", []) or []
+    idle_anchor = getattr(task, "last_worker_activity_at", None) or getattr(task, "updated_at", None) or now
+    if isinstance(idle_anchor, datetime):
+        if idle_anchor.tzinfo is None:
+            idle_anchor = idle_anchor.replace(tzinfo=timezone.utc)
+        idle_secs = max(0, int((now - idle_anchor).total_seconds()))
+    else:
+        idle_secs = 0
+    stall_hint_threshold = max(int(getattr(task, "check_interval", 600)) * 2, 600)
+
+    if getattr(task, "status", "") == "needs_input":
+        next_step = "Blocker: waiting for requested input"
+    elif getattr(task, "completion_deferred", False):
+        next_step = "Next: supervisor verification pending"
+    elif not running:
+        next_step = "Blocker: worker process exited; supervisor follow-up required"
+    elif len(child_pids) == 0 and idle_secs >= stall_hint_threshold:
+        next_step = f"Potential blocker: no worker MCP activity for {idle_secs}s"
+    else:
+        next_step = "Next: continue current task and report next milestone"
+
+    summary = _compact(
+        f"Current: {current_activity} | Completed: {completed_work} | {next_step}",
+        limit=500,
+    )
+    detail = (
+        f"Current activity: {current_activity}. "
+        f"Completed since last update: {completed_work}. "
+        f"{next_step}. "
+        f"Worker PID: {process_state.get('pid') or 'unknown'}, "
+        f"active processes: {len(active_pids)}, children: {len(child_pids)}."
+    )
+    return summary, detail
+
+
 def _recent_log_summary(log_dir: str) -> tuple[int, str, str]:
     main_log = os.path.join(log_dir, "copenclaw.log")
     main_lines = _tail_lines(main_log, max_lines=400)
@@ -1656,15 +1747,15 @@ def create_app() -> FastAPI:
                     idle_secs = _watchdog_idle_seconds(task, now)
 
                     if worker_running:
+                        heartbeat_summary, heartbeat_detail = _build_watchdog_progress_update(
+                            task,
+                            process_state,
+                            now=now,
+                        )
                         progress_msg = task_manager.maybe_record_periodic_progress(
                             task.task_id,
-                            summary="Task heartbeat: still running",
-                            detail=(
-                                f"Last MCP activity: {idle_secs}s ago. "
-                                f"PID: {process_state.get('pid') or 'unknown'}. "
-                                f"Active processes: {len(process_state.get('active_pids', []))} "
-                                f"(children: {child_count})."
-                            ),
+                            summary=heartbeat_summary,
+                            detail=heartbeat_detail,
                             interval_seconds=progress_interval,
                             from_tier="orchestrator",
                             now=now,
