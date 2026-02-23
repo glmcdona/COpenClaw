@@ -560,6 +560,8 @@ Or add to `~/.copilot/mcp-config.json`:
 | `tasks_send` | Send instruction/input/pause/resume/cancel to worker |
 | `tasks_cancel` | Cancel a running task |
 
+For `task_type="continuous_improvement"`, terminal iterations now auto-chain by default: COpenClaw creates and dispatches the next iteration with mission handoff context and a rotated focus direction (`ux`, `reliability`, `performance`, `quality`, `safety`, `observability`, `docs`). Use continuous config keys `auto_chain_enabled`, `auto_chain_max_generations`, `auto_chain_failure_limit`, and `auto_chain_failure_backoff_seconds` to tune guardrails.
+
 ### Task ITC tools (worker/supervisor)
 
 | Tool | Description |
