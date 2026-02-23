@@ -204,7 +204,7 @@ TASK_TOOLS = [
                 "channel": {"type": "string", "enum": ["telegram", "teams", "whatsapp", "signal", "slack"], "description": "Where to report results"},
                 "target": {"type": "string", "description": "Chat ID, conversation ID, phone number, or Slack channel ID for notifications"},
                 "service_url": {"type": "string", "description": "Required for Teams"},
-                "check_interval": {"type": "integer", "default": 300, "description": "Supervisor check interval in seconds"},
+                "check_interval": {"type": "integer", "default": 600, "description": "Supervisor check interval in seconds"},
                 "auto_supervise": {"type": "boolean", "default": True, "description": "Whether to auto-start a supervisor"},
                 "supervisor_instructions": {"type": "string", "description": "What the supervisor should watch for"},
                 "task_type": {"type": "string", "enum": ["standard", "continuous_improvement"], "default": "standard"},
@@ -236,7 +236,7 @@ TASK_TOOLS = [
                 "channel": {"type": "string", "enum": ["telegram", "teams", "whatsapp", "signal", "slack"], "description": "Where to report results"},
                 "target": {"type": "string", "description": "Chat ID, conversation ID, phone number, or Slack channel ID for notifications"},
                 "service_url": {"type": "string", "description": "Required for Teams"},
-                "check_interval": {"type": "integer", "default": 300, "description": "Supervisor check interval in seconds"},
+                "check_interval": {"type": "integer", "default": 600, "description": "Supervisor check interval in seconds"},
                 "auto_supervise": {"type": "boolean", "default": True, "description": "Whether to auto-start a supervisor"},
                 "task_type": {"type": "string", "enum": ["standard", "continuous_improvement"], "default": "standard"},
                 "continuous": {"type": "object", "description": "Continuous improvement configuration when task_type=continuous_improvement"},
@@ -1064,7 +1064,7 @@ class MCPProtocolHandler:
             channel=channel,
             target=target,
             service_url=args.get("service_url", ""),
-            check_interval=args.get("check_interval", 300),
+            check_interval=args.get("check_interval", 600),
             auto_supervise=args.get("auto_supervise", True),
             status="proposed",
         )
@@ -1130,7 +1130,7 @@ class MCPProtocolHandler:
             channel=channel,
             target=target,
             service_url=args.get("service_url", ""),
-            check_interval=args.get("check_interval", 300),
+            check_interval=args.get("check_interval", 600),
             auto_supervise=args.get("auto_supervise", True),
         )
 
@@ -1157,6 +1157,7 @@ class MCPProtocolHandler:
         # Callbacks for worker lifecycle
         def on_worker_output(task_id: str, output: str) -> None:
             tm.append_log(task_id, output)
+            self._sync_worker_process_state(tm, task_id)
 
         def on_worker_complete(task_id: str, output: str) -> None:
             tm.append_log(task_id, f"\n--- WORKER FINISHED ---\n{output}")
@@ -1165,10 +1166,13 @@ class MCPProtocolHandler:
             # Persist worker session ID for future resume on re-dispatch
             if pool:
                 w = pool.get_worker(task_id)
-                if w and w.session_id and t:
-                    t.worker_session_id = w.session_id
+                if w and t:
+                    if w.session_id:
+                        t.worker_session_id = w.session_id
+                    t.worker_pid = w.pid
                     tm._save()
-                    logger.info("Stored worker session %s on task %s for future resume", w.session_id, task_id)
+                    if w.session_id:
+                        logger.info("Stored worker session %s on task %s for future resume", w.session_id, task_id)
 
             if t and t.status not in ("completed", "failed", "cancelled"):
                 if output.startswith("ERROR:") or output.startswith("UNEXPECTED ERROR:"):
@@ -1177,6 +1181,9 @@ class MCPProtocolHandler:
                     tm.handle_report(task_id, "progress", "Worker CLI session ended", detail=output, from_tier="worker")
                     # Record worker exit time for stuck-detection
                     t.worker_exited_at = _now()
+                    t.worker_process_observed_at = _now()
+                    t.worker_child_pids = []
+                    t.worker_process_running = False
                     tm._save()
 
                     # If supervisor is still running but worker exited, check for
@@ -1267,6 +1274,48 @@ class MCPProtocolHandler:
 
         return on_worker_output, on_worker_complete
 
+    def _sync_worker_process_state(self, tm: TaskManager, task_id: str) -> dict[str, Any]:
+        task = tm.get(task_id)
+        if not task or not self.worker_pool:
+            return {"pid": None, "child_pids": [], "running": False, "active_pids": []}
+        worker = self.worker_pool.get_worker(task_id)
+        if not worker:
+            if task.worker_process_running:
+                task.worker_process_running = False
+                task.worker_process_observed_at = _now()
+                task.updated_at = _now()
+                tm._save()
+            return {"pid": task.worker_pid, "child_pids": list(task.worker_child_pids), "running": False, "active_pids": []}
+
+        snapshot = worker.process_snapshot() if hasattr(worker, "process_snapshot") else {}
+        pid = snapshot.get("pid", getattr(worker, "pid", None))
+        child_pids = [int(p) for p in snapshot.get("child_pids", []) if isinstance(p, int)]
+        active_pids = [int(p) for p in snapshot.get("active_pids", []) if isinstance(p, int)]
+        running = bool(snapshot.get("running")) or worker.is_running
+        observed_at = snapshot.get("observed_at") if isinstance(snapshot.get("observed_at"), datetime) else _now()
+
+        should_save = (
+            task.worker_pid != pid
+            or list(task.worker_child_pids) != child_pids
+            or bool(task.worker_process_running) != bool(running)
+            or not task.worker_process_observed_at
+            or (observed_at - task.worker_process_observed_at).total_seconds() >= 30
+        )
+        if should_save:
+            task.worker_pid = pid
+            task.worker_child_pids = child_pids
+            task.worker_process_running = bool(running)
+            task.worker_process_observed_at = observed_at
+            task.updated_at = _now()
+            tm._save()
+
+        return {
+            "pid": pid,
+            "child_pids": child_pids,
+            "running": bool(running),
+            "active_pids": active_pids,
+        }
+
     def _start_task(self, task: Any) -> dict:
         """Start a task's worker (and supervisor). Used by both approve and create."""
         tm = self._require_task_manager()
@@ -1287,6 +1336,7 @@ class MCPProtocolHandler:
             on_output=on_worker_output,
             on_complete=on_worker_complete,
         )
+        self._sync_worker_process_state(tm, task.task_id)
 
         # NOTE: We do NOT send a "Started" notification here.  The
         # orchestrator's chat response (returned via handle_chat after the
@@ -1407,6 +1457,7 @@ class MCPProtocolHandler:
         task = tm.get(args["task_id"])
         if not task:
             raise ValueError(f"Task not found: {args['task_id']}")
+        process_state = self._sync_worker_process_state(tm, task.task_id)
         limit = args.get("timeline_limit", 20)
         result = {
             "task_id": task.task_id,
@@ -1421,6 +1472,9 @@ class MCPProtocolHandler:
             "supervisor_session_id": task.supervisor_session_id,
             "timeline": task.concise_timeline(limit),
             "pending_inbox": len([m for m in task.inbox if not m.acknowledged]),
+            "worker_pid": process_state.get("pid"),
+            "worker_child_processes": len(process_state.get("child_pids", [])),
+            "worker_process_running": bool(process_state.get("running")),
         }
         if getattr(task, "task_type", "standard") == "continuous_improvement":
             result["continuous"] = tm.continuous_status(task)
@@ -1620,10 +1674,8 @@ class MCPProtocolHandler:
                     "success", "correct", "passed", "ok", "done", "finished",
                     "created", "built", "working",
                 ])
-                worker_running = True
-                if self.worker_pool:
-                    worker = self.worker_pool.get_worker(task_id)
-                    worker_running = worker.is_running if worker else False
+                process_state = self._sync_worker_process_state(tm, task_id)
+                worker_running = bool(process_state.get("running"))
                 can_complete = task.completion_deferred or not worker_running
 
                 # STUCK-ASSESSMENT DETECTION: If the worker is dead and the
@@ -1804,12 +1856,15 @@ class MCPProtocolHandler:
 
         # ── Worker Status Block (gives supervisor full execution context) ──
         now = _now()
-        worker_running = False
+        process_state = self._sync_worker_process_state(tm, task_id)
+        worker_running = bool(process_state.get("running"))
+        worker_pid = process_state.get("pid")
+        child_pids = process_state.get("child_pids", [])
+        active_pids = process_state.get("active_pids", [])
         worker_state = "not started"
         if self.worker_pool:
             worker = self.worker_pool.get_worker(task_id)
             if worker:
-                worker_running = worker.is_running
                 if worker_running:
                     worker_state = "RUNNING"
                 else:
@@ -1825,7 +1880,8 @@ class MCPProtocolHandler:
                 last_activity_str = f"{age_secs}s ago"
             else:
                 last_activity_str = f"{age_secs // 60}m {age_secs % 60}s ago"
-            if age_secs > 300 and worker_running:
+            stall_threshold = max(int(getattr(task, "check_interval", 600)) * 3, 900)
+            if age_secs > stall_threshold and worker_running and not child_pids:
                 last_activity_str += " — MAY BE STUCK"
 
         # Worker exit age
@@ -1861,6 +1917,9 @@ class MCPProtocolHandler:
         status_lines = [
             "=== Worker Status ===",
             f"Process: {worker_state}" + (f" — {worker_exit_str}" if worker_exit_str and not worker_running else ""),
+            f"Worker PID: {worker_pid if worker_pid else 'unknown'}",
+            f"Observed child processes: {len(child_pids)}",
+            f"Active process count: {len(active_pids)}",
             f"Last MCP activity: {last_activity_str}",
             f"Completion deferred: {deferred_str}",
         ]
@@ -1997,7 +2056,7 @@ class MCPProtocolHandler:
             return
         if task.supervisor_job_id:
             self.scheduler.cancel(task.supervisor_job_id)
-        run_at = datetime.utcnow() + timedelta(seconds=min(30, task.check_interval))
+        run_at = datetime.utcnow() + timedelta(seconds=max(60, task.check_interval))
         payload = {
             "type": "supervisor_check",
             "task_id": task.task_id,

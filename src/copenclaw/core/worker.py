@@ -20,6 +20,8 @@ Directory layout per task::
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import json
 import logging
 import os
 import shutil
@@ -42,6 +44,72 @@ from copenclaw.integrations.copilot_cli import (
 )
 
 logger = logging.getLogger("copenclaw.worker")
+
+
+def _collect_child_processes(root_pid: int) -> list[int]:
+    """Best-effort recursive child-process discovery for a worker PID."""
+    if root_pid <= 0:
+        return []
+    parent_map: dict[int, list[int]] = {}
+    try:
+        if sys.platform == "win32":
+            proc = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId | ConvertTo-Json -Compress",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            raw = (proc.stdout or "").strip()
+            if not raw:
+                return []
+            parsed = json.loads(raw)
+            rows = parsed if isinstance(parsed, list) else [parsed]
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                pid = row.get("ProcessId")
+                ppid = row.get("ParentProcessId")
+                if isinstance(pid, int) and isinstance(ppid, int):
+                    parent_map.setdefault(ppid, []).append(pid)
+        else:
+            proc = subprocess.run(
+                ["ps", "-eo", "pid=,ppid="],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            for line in (proc.stdout or "").splitlines():
+                parts = line.strip().split()
+                if len(parts) != 2:
+                    continue
+                try:
+                    pid = int(parts[0])
+                    ppid = int(parts[1])
+                except ValueError:
+                    continue
+                parent_map.setdefault(ppid, []).append(pid)
+    except Exception:  # noqa: BLE001
+        return []
+
+    descendants: list[int] = []
+    stack = list(parent_map.get(root_pid, []))
+    seen: set[int] = set()
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        descendants.append(pid)
+        stack.extend(parent_map.get(pid, []))
+    descendants.sort()
+    return descendants
 
 # ── System prompt templates ──────────────────────────────────
 # Templates are now loaded from copenclaw/templates/*.md via
@@ -422,6 +490,8 @@ class WorkerThread:
         self._process: Optional[subprocess.Popen] = None
         self._session_id: Optional[str] = None
         self._accumulated_output: list[str] = []
+        self._last_pid: Optional[int] = None
+        self._last_child_pids: list[int] = []
 
     @property
     def session_id(self) -> Optional[str]:
@@ -430,6 +500,35 @@ class WorkerThread:
     @property
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def pid(self) -> Optional[int]:
+        if self._process is not None:
+            return self._process.pid
+        return self._last_pid
+
+    @property
+    def exit_code(self) -> Optional[int]:
+        if self._process is None or self._process.poll() is None:
+            return None
+        return self._process.returncode
+
+    def process_snapshot(self) -> dict[str, Any]:
+        root_pid = self.pid
+        root_running = bool(self._process is not None and self._process.poll() is None)
+        child_pids = _collect_child_processes(root_pid) if root_pid else []
+        if child_pids:
+            self._last_child_pids = child_pids
+        elif root_running and self._last_child_pids:
+            child_pids = list(self._last_child_pids)
+        active_pids = ([root_pid] if root_pid and root_running else []) + child_pids
+        return {
+            "pid": root_pid,
+            "child_pids": child_pids,
+            "active_pids": list(dict.fromkeys(active_pids)),
+            "running": bool(active_pids),
+            "observed_at": datetime.now(timezone.utc),
+        }
 
     @property
     def workspace_dir(self) -> str:
@@ -614,6 +713,8 @@ class WorkerThread:
                 # On Windows, CREATE_NEW_PROCESS_GROUP lets us terminate cleanly
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
             )
+            self._last_pid = self._process.pid
+            self._last_child_pids = []
 
             self._log(f"Process started (pid={self._process.pid})")
 
@@ -710,7 +811,7 @@ class SupervisorThread:
         worker_session_id: Optional[str],
         mcp_server_url: str,
         mcp_token: Optional[str] = None,
-        check_interval: int = 120,
+        check_interval: int = 600,
         on_output: Optional[Callable[[str, str], None]] = None,
         timeout: int = 120,
         supervisor_instructions: str = "",
@@ -827,9 +928,17 @@ class SupervisorThread:
 
         # Check if worker is still running
         worker_running = True
+        worker_pid: Optional[int] = None
+        child_pids: list[int] = []
         if self._worker_pool:
             worker = self._worker_pool.get_worker(self.task_id)
-            worker_running = worker.is_running if worker else False
+            if worker:
+                snapshot = worker.process_snapshot()
+                worker_pid = snapshot.get("pid")
+                child_pids = list(snapshot.get("child_pids", []))
+                worker_running = bool(snapshot.get("running")) or worker.is_running
+            else:
+                worker_running = False
 
         if task and task.completion_deferred and not worker_running:
             # CRITICAL: Worker exited + completion deferred = must finalize NOW
@@ -853,32 +962,45 @@ class SupervisorThread:
             )
         elif not worker_running and task and task.status == "running":
             # Worker died without reporting completion
+            pid_hint = f"Last known PID: {worker_pid}. " if worker_pid else ""
             return (
                 base +
                 f"WARNING: The worker process has EXITED but the task is still marked as running. "
+                + pid_hint +
                 f"The worker may have crashed or gotten stuck. Use task_read_peer to review what happened. "
                 f"If the work was completed, report type='completed'. If it failed, report type='failed'. "
                 f"If the worker needs to be re-dispatched, report type='escalation'."
             )
         elif task and task.last_worker_activity_at:
             # Check for idle worker
-            from datetime import datetime, timezone
             now = datetime.now(timezone.utc)
             idle_secs = int((now - task.last_worker_activity_at).total_seconds())
-            if idle_secs > 300 and worker_running:
+            stall_threshold = max(900, self.check_interval * 3)
+            process_tree_active = len(child_pids) > 0
+            if idle_secs > stall_threshold and worker_running:
+                child_hint = f"Observed child processes: {len(child_pids)}. " if process_tree_active else ""
                 return (
                     base +
                     f"The worker has had no MCP activity for {idle_secs // 60}m {idle_secs % 60}s. "
                     f"It may be STUCK on a blocking command or in an infinite loop. "
+                    + child_hint +
                     f"Use task_read_peer to check its latest activity, and if stuck, "
                     f"use task_send_input to give guidance or report type='intervention'."
+                )
+            if idle_secs > 300 and worker_running and process_tree_active:
+                return (
+                    base +
+                    f"The worker has no recent MCP activity ({idle_secs // 60}m {idle_secs % 60}s), "
+                    f"but its process tree is still active ({len(child_pids)} child process(es)). "
+                    f"Monitor passively and do NOT send assessment/intervention unless clear failure signals appear."
                 )
 
         # Normal check
         return (
             base +
-            f"Check on the worker using task_read_peer and assess progress. "
-            f"Report your assessment using task_report."
+            "The worker appears healthy. Monitor passively; do not send routine assessments or nudges. "
+            "Only use task_report when you detect clear failure indicators (worker exited unexpectedly, "
+            "repeated hard errors, or sustained stall beyond threshold)."
         )
 
     def _run(self) -> None:
@@ -1055,7 +1177,7 @@ class WorkerPool:
         task_id: str,
         prompt: str,
         worker_session_id: Optional[str] = None,
-        check_interval: int = 120,
+        check_interval: int = 600,
         on_output: Optional[Callable[[str, str], None]] = None,
         supervisor_instructions: str = "",
         working_dir: Optional[str] = None,

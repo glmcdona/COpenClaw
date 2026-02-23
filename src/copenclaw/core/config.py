@@ -16,6 +16,7 @@ class Settings:
     task_watchdog_idle_warn_seconds: int
     task_watchdog_idle_restart_seconds: int
     task_watchdog_max_restarts: int
+    task_progress_report_interval_seconds: int
     telegram_bot_token: str | None
     telegram_webhook_secret: str | None
     telegram_allow_from: list[str]
@@ -64,6 +65,7 @@ class Settings:
             task_watchdog_idle_warn_seconds=int(os.getenv("copenclaw_TASK_WATCHDOG_IDLE_WARN_SECONDS", "1800")),
             task_watchdog_idle_restart_seconds=int(os.getenv("copenclaw_TASK_WATCHDOG_IDLE_RESTART_SECONDS", "3600")),
             task_watchdog_max_restarts=int(os.getenv("copenclaw_TASK_WATCHDOG_MAX_RESTARTS", "1")),
+            task_progress_report_interval_seconds=int(os.getenv("copenclaw_TASK_PROGRESS_REPORT_INTERVAL_SECONDS", "900")),
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN"),
             telegram_webhook_secret=os.getenv("TELEGRAM_WEBHOOK_SECRET"),
             telegram_allow_from=[v.strip() for v in telegram_allow.split(",") if v.strip()],

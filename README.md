@@ -597,6 +597,7 @@ All configuration is via environment variables (or `.env` file). See [`.env.exam
 | `COPILOT_CLAW_TASK_WATCHDOG_IDLE_WARN_SECONDS` | `1800` | Idle seconds before warning |
 | `COPILOT_CLAW_TASK_WATCHDOG_IDLE_RESTART_SECONDS` | `3600` | Idle seconds before auto-restart |
 | `COPILOT_CLAW_TASK_WATCHDOG_MAX_RESTARTS` | `1` | Max restarts before escalation |
+| `COPILOT_CLAW_TASK_PROGRESS_REPORT_INTERVAL_SECONDS` | `900` | Seconds between periodic running-task progress notifications |
 
 ---
 

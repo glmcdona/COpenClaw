@@ -183,7 +183,7 @@ class Task:
     supervisor_instructions: str = ""   # what the supervisor should watch for
 
     # Supervision
-    check_interval: int = 120           # seconds between supervisor checks
+    check_interval: int = 600           # seconds between supervisor checks
     auto_supervise: bool = True
 
     # Communication
@@ -212,6 +212,11 @@ class Task:
     supervisor_assessment_count: int = 0        # consecutive assessments without finalization
     last_worker_activity_at: Optional[datetime] = None  # last MCP tool call from worker
     worker_exited_at: Optional[datetime] = None  # when worker process exited
+    worker_pid: Optional[int] = None
+    worker_child_pids: List[int] = field(default_factory=list)
+    worker_process_running: bool = False
+    worker_process_observed_at: Optional[datetime] = None
+    last_progress_report_at: Optional[datetime] = None
 
     # Recovery tracking — tasks that were in-progress when the app restarted
     recovery_pending: bool = False
@@ -260,6 +265,11 @@ class Task:
             "supervisor_assessment_count": self.supervisor_assessment_count,
             "last_worker_activity_at": self.last_worker_activity_at.isoformat() if self.last_worker_activity_at else None,
             "worker_exited_at": self.worker_exited_at.isoformat() if self.worker_exited_at else None,
+            "worker_pid": self.worker_pid,
+            "worker_child_pids": self.worker_child_pids,
+            "worker_process_running": self.worker_process_running,
+            "worker_process_observed_at": self.worker_process_observed_at.isoformat() if self.worker_process_observed_at else None,
+            "last_progress_report_at": self.last_progress_report_at.isoformat() if self.last_progress_report_at else None,
             "recovery_pending": self.recovery_pending,
             "watchdog_state": self.watchdog_state,
             "watchdog_last_action_at": self.watchdog_last_action_at.isoformat() if self.watchdog_last_action_at else None,
@@ -287,7 +297,7 @@ class Task:
             service_url=d.get("service_url", ""),
             plan=d.get("plan", ""),
             supervisor_instructions=d.get("supervisor_instructions", ""),
-            check_interval=d.get("check_interval", 120),
+            check_interval=d.get("check_interval", 600),
             auto_supervise=d.get("auto_supervise", True),
             timeline=[TimelineEntry.from_dict(e) for e in d.get("timeline", [])],
             inbox=[TaskMessage.from_dict(m) for m in d.get("inbox", [])],
@@ -306,6 +316,11 @@ class Task:
             supervisor_assessment_count=d.get("supervisor_assessment_count", 0),
             last_worker_activity_at=datetime.fromisoformat(d["last_worker_activity_at"]) if d.get("last_worker_activity_at") else None,
             worker_exited_at=datetime.fromisoformat(d["worker_exited_at"]) if d.get("worker_exited_at") else None,
+            worker_pid=d.get("worker_pid"),
+            worker_child_pids=[int(p) for p in d.get("worker_child_pids", []) if isinstance(p, int) or (isinstance(p, str) and p.isdigit())],
+            worker_process_running=bool(d.get("worker_process_running", False)),
+            worker_process_observed_at=datetime.fromisoformat(d["worker_process_observed_at"]) if d.get("worker_process_observed_at") else None,
+            last_progress_report_at=datetime.fromisoformat(d["last_progress_report_at"]) if d.get("last_progress_report_at") else None,
             recovery_pending=d.get("recovery_pending", False),
             watchdog_state=d.get("watchdog_state", "none"),
             watchdog_last_action_at=datetime.fromisoformat(d["watchdog_last_action_at"]) if d.get("watchdog_last_action_at") else None,
@@ -832,7 +847,7 @@ class TaskManager:
         channel: str = "",
         target: str = "",
         service_url: str = "",
-        check_interval: int = 120,
+        check_interval: int = 600,
         auto_supervise: bool = True,
         plan: str = "",
         supervisor_instructions: str = "",
@@ -1078,6 +1093,38 @@ class TaskManager:
         self._save()
 
         logger.info("Task %s report [%s]: %s", task_id, msg_type, summary)
+        return msg
+
+    def maybe_record_periodic_progress(
+        self,
+        task_id: str,
+        summary: str,
+        detail: str = "",
+        interval_seconds: int = 900,
+        from_tier: str = "orchestrator",
+        now: Optional[datetime] = None,
+    ) -> Optional[TaskMessage]:
+        task = self._tasks.get(task_id)
+        if not task or task.status != "running":
+            return None
+        interval = max(1, int(interval_seconds))
+        now_ts = now or _now()
+        if task.last_progress_report_at:
+            elapsed = (now_ts - task.last_progress_report_at).total_seconds()
+            if elapsed < interval:
+                return None
+        msg = self.handle_report(
+            task_id=task_id,
+            msg_type="progress",
+            summary=summary,
+            detail=detail,
+            from_tier=from_tier,
+        )
+        if not msg:
+            return None
+        task.last_progress_report_at = now_ts
+        task.updated_at = _now()
+        self._save()
         return msg
 
     def should_notify_user(self, msg: TaskMessage) -> bool:
