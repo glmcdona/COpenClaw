@@ -30,6 +30,12 @@ logger = logging.getLogger("copenclaw.router")
 APPROVE_PATTERNS = re.compile(r"^(yes|approve|go|👍|yep|yeah|do it|ok|confirmed?)$", re.IGNORECASE)
 REJECT_PATTERNS = re.compile(r"^(no|reject|cancel|👎|nope|nah|don'?t|stop)$", re.IGNORECASE)
 PING_BACK_RE = re.compile(r"^ping(?:\s+back)?\s+in\s+(\d+)\s*(?:s|sec|secs|second|seconds)$", re.IGNORECASE)
+PROPOSAL_CONFIRM_RE = re.compile(r"reply\s+yes\s+to\s+approve\s+or\s+no\s+to\s+reject", re.IGNORECASE)
+
+
+def _should_stop_after_proposal_line(line: str) -> bool:
+    """Return True when streamed orchestrator output already contains approval prompt."""
+    return bool(PROPOSAL_CONFIRM_RE.search(line))
 
 @dataclass
 class ChatRequest:
@@ -396,7 +402,11 @@ def handle_chat(
     )
 
     try:
-        output = cli.run_prompt(prompt_with_reminder, resume_id=copilot_sid)
+        output = cli.run_prompt(
+            prompt_with_reminder,
+            resume_id=copilot_sid,
+            on_line=_should_stop_after_proposal_line,
+        )
     except CopilotCliError as exc:
         # If a previously stored resume session is stale (for example after a
         # crashed Copilot CLI process), clear it and retry once without resume.
@@ -407,7 +417,11 @@ def handle_chat(
                 sessions.clear_copilot_session_id(session_key)
             cli.resume_session_id = None
             try:
-                output = cli.run_prompt(prompt_with_reminder, resume_id=None)
+                output = cli.run_prompt(
+                    prompt_with_reminder,
+                    resume_id=None,
+                    on_line=_should_stop_after_proposal_line,
+                )
             except CopilotCliError as retry_exc:
                 output = f"Error: {retry_exc}"
         else:

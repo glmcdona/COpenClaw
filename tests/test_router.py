@@ -3,7 +3,12 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from copenclaw.core.pairing import PairingStore
-from copenclaw.core.router import ChatRequest, ChatResponse, handle_chat
+from copenclaw.core.router import (
+    ChatRequest,
+    ChatResponse,
+    _should_stop_after_proposal_line,
+    handle_chat,
+)
 from copenclaw.core.scheduler import Scheduler
 from copenclaw.core.session import SessionStore
 from copenclaw.core.tasks import TaskManager
@@ -111,6 +116,30 @@ def test_freetext_calls_copilot(monkeypatch) -> None:
         # First message has no history, so prompt is passed through as-is
         # (delegation reminder suffix is appended but the core prompt is there)
         assert resp.text.startswith("echo:explain quantum computing")
+
+def test_proposal_stop_line_detection() -> None:
+    assert _should_stop_after_proposal_line("Reply Yes to approve or No to reject.")
+    assert _should_stop_after_proposal_line("reply yes to approve or no to reject")
+    assert not _should_stop_after_proposal_line("I will continue investigating now.")
+
+def test_freetext_passes_proposal_stop_callback(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        deps = _make_deps(tmpdir)
+        captured = {}
+
+        def mock_run(prompt, **kw):
+            captured["on_line"] = kw.get("on_line")
+            return "ok"
+
+        monkeypatch.setattr(deps["cli"], "run_prompt", mock_run)
+        monkeypatch.setattr(deps["cli"], "_discover_latest_non_task_session_id", lambda: None)
+
+        req = ChatRequest(channel="telegram", sender_id="42", chat_id="100", text="propose something")
+        resp = handle_chat(req, **deps)
+
+        assert resp.text == "ok"
+        assert callable(captured.get("on_line"))
+        assert captured["on_line"]("Reply Yes to approve or No to reject.") is True
 
 def test_freetext_recovers_from_stale_resume_session(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as tmpdir:

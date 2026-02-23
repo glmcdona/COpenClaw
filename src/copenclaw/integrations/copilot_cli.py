@@ -542,7 +542,7 @@ class CopilotCli:
         resume_id: Optional[str],
         allow_retry: bool,
         autopilot: Optional[bool],
-        on_line: Optional[Callable[[str], None]],
+        on_line: Optional[Callable[[str], Optional[bool]]],
     ) -> str:
         cmd = self._base_cmd(resume_id=resume_id, autopilot=autopilot)
         cmd.extend(["-p", prompt])
@@ -567,6 +567,7 @@ class CopilotCli:
 
         output_lines: list[str] = []
         start_time = time.monotonic()
+        early_stopped = False
         try:
             assert process.stdout is not None
             for line in process.stdout:
@@ -577,8 +578,17 @@ class CopilotCli:
                 output_lines.append(line)
                 self._log_line(line, prefix=log_prefix)
                 if on_line:
-                    on_line(line.rstrip("\n\r"))
-            process.wait(timeout=10)
+                    should_stop = on_line(line.rstrip("\n\r"))
+                    if should_stop:
+                        early_stopped = True
+                        logger.info("%s | Early stop requested; terminating Copilot CLI process", log_prefix)
+                        process.terminate()
+                        break
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
         except CopilotCliError:
             raise
         except Exception as exc:
@@ -586,7 +596,7 @@ class CopilotCli:
             raise CopilotCliError(f"copilot CLI error: {exc}") from exc
 
         output = "".join(output_lines).strip()
-        if process.returncode != 0:
+        if process.returncode != 0 and not early_stopped:
             if allow_retry and not self._subcommand and self._should_retry_with_chat(output):
                 logger.warning("copilot CLI rejected args; retrying with 'chat' subcommand")
                 self._subcommand = "chat"
@@ -663,7 +673,7 @@ class CopilotCli:
         allow_retry: bool = True,
         execution_backend: Optional[Literal["api", "cli"]] = None,
         autopilot: Optional[bool] = None,
-        on_line: Optional[Callable[[str], None]] = None,
+        on_line: Optional[Callable[[str], Optional[bool]]] = None,
     ) -> str:
         """Send a user prompt to Copilot CLI with streaming output.
 
