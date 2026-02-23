@@ -128,7 +128,7 @@ def test_freetext_recovers_from_stale_resume_session(monkeypatch) -> None:
             return "recovered"
 
         monkeypatch.setattr(deps["cli"], "run_prompt", flaky_run)
-        monkeypatch.setattr(deps["cli"], "_discover_latest_session_id", lambda: None)
+        monkeypatch.setattr(deps["cli"], "_discover_latest_non_task_session_id", lambda: None)
 
         req = ChatRequest(channel="telegram", sender_id="42", chat_id="100", text="status")
         resp = handle_chat(req, **deps)
@@ -136,6 +136,29 @@ def test_freetext_recovers_from_stale_resume_session(monkeypatch) -> None:
         assert resp.text == "recovered"
         assert calls["count"] == 2
         assert deps["sessions"].get_copilot_session_id(session_key) is None
+
+def test_freetext_ignores_task_role_session_id(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        deps = _make_deps(tmpdir)
+        session_key = "telegram:dm:42"
+        deps["sessions"].set_copilot_session_id(session_key, "task-session-id")
+
+        resume_ids = []
+
+        def run_prompt(prompt, **kw):
+            resume_ids.append(kw.get("resume_id"))
+            return "ok"
+
+        monkeypatch.setattr(deps["cli"], "session_is_task_role", lambda sid: sid == "task-session-id")
+        monkeypatch.setattr(deps["cli"], "run_prompt", run_prompt)
+        monkeypatch.setattr(deps["cli"], "_discover_latest_non_task_session_id", lambda: "fresh-session-id")
+
+        req = ChatRequest(channel="telegram", sender_id="42", chat_id="100", text="Status")
+        resp = handle_chat(req, **deps)
+
+        assert resp.text == "ok"
+        assert resume_ids == [None]
+        assert deps["sessions"].get_copilot_session_id(session_key) == "fresh-session-id"
 
 def test_telegram_ping_back_schedules_and_delivers(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -532,8 +555,8 @@ def test_conversation_context_sent_to_cli(monkeypatch) -> None:
             return "response"
 
         monkeypatch.setattr(deps["cli"], "run_prompt", mock_run)
-        # Simulate that _discover_latest_session_id returns a session ID
-        monkeypatch.setattr(deps["cli"], "_discover_latest_session_id", lambda: "sess-abc123")
+        # Simulate that non-task session discovery returns a session ID
+        monkeypatch.setattr(deps["cli"], "_discover_latest_non_task_session_id", lambda: "sess-abc123")
 
         # First message — no stored copilot session ID yet
         req1 = ChatRequest(channel="telegram", sender_id="42", chat_id="100", text="What is Python?")

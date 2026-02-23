@@ -366,10 +366,7 @@ class CopilotCli:
             logger.debug("No Copilot sessions dir found at %s", sessions_dir)
             return None
         try:
-            entries = [
-                e for e in os.scandir(sessions_dir)
-                if e.is_dir()
-            ]
+            entries = [e for e in os.scandir(sessions_dir) if e.is_dir()]
             if not entries:
                 return None
             latest = max(entries, key=lambda e: e.stat().st_mtime)
@@ -379,6 +376,55 @@ class CopilotCli:
         except Exception as exc:  # noqa: BLE001
             logger.debug("Failed to discover session ID: %s", exc)
             return None
+
+    @staticmethod
+    def _session_summary(session_dir: str) -> str:
+        """Read session summary text from workspace.yaml (best-effort)."""
+        workspace_yaml = os.path.join(session_dir, "workspace.yaml")
+        if not os.path.isfile(workspace_yaml):
+            return ""
+        try:
+            with open(workspace_yaml, "r", encoding="utf-8") as handle:
+                for raw in handle:
+                    line = raw.strip()
+                    if line.startswith("summary:"):
+                        return line.split(":", 1)[1].strip().lower()
+        except Exception:  # noqa: BLE001
+            return ""
+        return ""
+
+    def session_is_task_role(self, session_id: str) -> bool:
+        """Return True if session summary indicates worker/supervisor task role."""
+        config_dir = os.path.expanduser("~/.copilot")
+        session_dir = os.path.join(config_dir, "session-state", session_id)
+        if not os.path.isdir(session_dir):
+            session_dir = os.path.join(config_dir, "sessions", session_id)
+        summary = self._session_summary(session_dir)
+        return summary.startswith("you are worker for task") or summary.startswith("you are supervisor for task")
+
+    def _discover_latest_non_task_session_id(self) -> Optional[str]:
+        """Discover latest session, excluding worker/supervisor task sessions."""
+        config_dir = os.path.expanduser("~/.copilot")
+        sessions_dir = os.path.join(config_dir, "session-state")
+        if not os.path.isdir(sessions_dir):
+            sessions_dir = os.path.join(config_dir, "sessions")
+        if not os.path.isdir(sessions_dir):
+            return None
+        try:
+            entries = sorted(
+                [e for e in os.scandir(sessions_dir) if e.is_dir()],
+                key=lambda e: e.stat().st_mtime,
+                reverse=True,
+            )
+            for entry in entries:
+                summary = self._session_summary(entry.path)
+                if summary.startswith("you are worker for task") or summary.startswith("you are supervisor for task"):
+                    continue
+                logger.info("Discovered latest non-task Copilot CLI session: %s", entry.name)
+                return entry.name
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Failed to discover non-task session ID: %s", exc)
+        return None
 
     # ── public API ────────────────────────────────────────────
 

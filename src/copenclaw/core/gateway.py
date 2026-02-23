@@ -774,7 +774,7 @@ def create_app() -> FastAPI:
             # Discover the session ID that Copilot CLI just created and
             # store it so subsequent user messages resume this session
             # (preserving the boot context including README.md).
-            boot_sid = cli._discover_latest_session_id()
+            boot_sid = cli._discover_latest_non_task_session_id()
             if boot_sid:
                 cli._resume_session_id = boot_sid
                 cli._session_id = boot_sid

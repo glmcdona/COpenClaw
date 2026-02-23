@@ -378,6 +378,10 @@ def handle_chat(
     # If none is stored, fall back to the CLI's default resume ID
     # (set during boot from the boot session).
     copilot_sid = sessions.get_copilot_session_id(session_key)
+    if copilot_sid and cli.session_is_task_role(copilot_sid):
+        logger.warning("Ignoring task-role session ID for orchestrator chat: %s", copilot_sid)
+        sessions.clear_copilot_session_id(session_key)
+        copilot_sid = None
 
     # Append delegation reminder to the user message (recency bias)
     prompt_with_reminder = (
@@ -414,7 +418,7 @@ def handle_chat(
     # (not just on the first message) because the boot session's ID
     # may have been used on the first call, and we need to capture
     # the actual session that now contains the user's conversation.
-    discovered = cli._discover_latest_session_id()
+    discovered = cli._discover_latest_non_task_session_id()
     if discovered and discovered != copilot_sid:
         sessions.set_copilot_session_id(session_key, discovered)
         logger.info("Stored Copilot CLI session %s for %s", discovered, session_key)
