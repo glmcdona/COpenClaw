@@ -30,6 +30,12 @@ logger = logging.getLogger("copenclaw.router")
 APPROVE_PATTERNS = re.compile(r"^(yes|approve|go|👍|yep|yeah|do it|ok|confirmed?)$", re.IGNORECASE)
 REJECT_PATTERNS = re.compile(r"^(no|reject|cancel|👎|nope|nah|don'?t|stop)$", re.IGNORECASE)
 PING_BACK_RE = re.compile(r"^ping(?:\s+back)?\s+in\s+(\d+)\s*(?:s|sec|secs|second|seconds)$", re.IGNORECASE)
+PROPOSAL_CONFIRM_RE = re.compile(r"reply\s+yes\s+to\s+approve\s+or\s+no\s+to\s+reject", re.IGNORECASE)
+
+
+def _should_stop_after_proposal_line(line: str) -> bool:
+    """Return True when streamed orchestrator output already contains approval prompt."""
+    return bool(PROPOSAL_CONFIRM_RE.search(line))
 
 @dataclass
 class ChatRequest:
@@ -378,6 +384,10 @@ def handle_chat(
     # If none is stored, fall back to the CLI's default resume ID
     # (set during boot from the boot session).
     copilot_sid = sessions.get_copilot_session_id(session_key)
+    if copilot_sid and cli.session_is_task_role(copilot_sid):
+        logger.warning("Ignoring task-role session ID for orchestrator chat: %s", copilot_sid)
+        sessions.clear_copilot_session_id(session_key)
+        copilot_sid = None
 
     # Append delegation reminder to the user message (recency bias)
     prompt_with_reminder = (
@@ -392,16 +402,37 @@ def handle_chat(
     )
 
     try:
-        output = cli.run_prompt(prompt_with_reminder, resume_id=copilot_sid)
+        output = cli.run_prompt(
+            prompt_with_reminder,
+            resume_id=copilot_sid,
+            on_line=_should_stop_after_proposal_line,
+        )
     except CopilotCliError as exc:
-        output = f"Error: {exc}"
+        # If a previously stored resume session is stale (for example after a
+        # crashed Copilot CLI process), clear it and retry once without resume.
+        had_resume = bool(copilot_sid or cli.resume_session_id)
+        if had_resume:
+            logger.warning("Copilot CLI resume failed for %s; retrying without resume: %s", session_key, exc)
+            if copilot_sid:
+                sessions.clear_copilot_session_id(session_key)
+            cli.resume_session_id = None
+            try:
+                output = cli.run_prompt(
+                    prompt_with_reminder,
+                    resume_id=None,
+                    on_line=_should_stop_after_proposal_line,
+                )
+            except CopilotCliError as retry_exc:
+                output = f"Error: {retry_exc}"
+        else:
+            output = f"Error: {exc}"
 
     # After the prompt completes, discover the session ID so we can
     # resume this conversation next time.  We always try to discover
     # (not just on the first message) because the boot session's ID
     # may have been used on the first call, and we need to capture
     # the actual session that now contains the user's conversation.
-    discovered = cli._discover_latest_session_id()
+    discovered = cli._discover_latest_non_task_session_id()
     if discovered and discovered != copilot_sid:
         sessions.set_copilot_session_id(session_key, discovered)
         logger.info("Stored Copilot CLI session %s for %s", discovered, session_key)

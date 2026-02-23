@@ -3,11 +3,16 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from copenclaw.core.pairing import PairingStore
-from copenclaw.core.router import ChatRequest, ChatResponse, handle_chat
+from copenclaw.core.router import (
+    ChatRequest,
+    ChatResponse,
+    _should_stop_after_proposal_line,
+    handle_chat,
+)
 from copenclaw.core.scheduler import Scheduler
 from copenclaw.core.session import SessionStore
 from copenclaw.core.tasks import TaskManager
-from copenclaw.integrations.copilot_cli import CopilotCli
+from copenclaw.integrations.copilot_cli import CopilotCli, CopilotCliError
 from copenclaw.integrations.telegram import TelegramAdapter
 
 def _make_deps(
@@ -111,6 +116,78 @@ def test_freetext_calls_copilot(monkeypatch) -> None:
         # First message has no history, so prompt is passed through as-is
         # (delegation reminder suffix is appended but the core prompt is there)
         assert resp.text.startswith("echo:explain quantum computing")
+
+def test_proposal_stop_line_detection() -> None:
+    assert _should_stop_after_proposal_line("Reply Yes to approve or No to reject.")
+    assert _should_stop_after_proposal_line("reply yes to approve or no to reject")
+    assert not _should_stop_after_proposal_line("I will continue investigating now.")
+
+def test_freetext_passes_proposal_stop_callback(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        deps = _make_deps(tmpdir)
+        captured = {}
+
+        def mock_run(prompt, **kw):
+            captured["on_line"] = kw.get("on_line")
+            return "ok"
+
+        monkeypatch.setattr(deps["cli"], "run_prompt", mock_run)
+        monkeypatch.setattr(deps["cli"], "_discover_latest_non_task_session_id", lambda: None)
+
+        req = ChatRequest(channel="telegram", sender_id="42", chat_id="100", text="propose something")
+        resp = handle_chat(req, **deps)
+
+        assert resp.text == "ok"
+        assert callable(captured.get("on_line"))
+        assert captured["on_line"]("Reply Yes to approve or No to reject.") is True
+
+def test_freetext_recovers_from_stale_resume_session(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        deps = _make_deps(tmpdir)
+        session_key = "telegram:dm:42"
+        deps["sessions"].set_copilot_session_id(session_key, "stale-session-id")
+
+        calls = {"count": 0}
+
+        def flaky_run(prompt, **kw):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise CopilotCliError("copilot CLI failed with exit code 1")
+            assert kw.get("resume_id") is None
+            return "recovered"
+
+        monkeypatch.setattr(deps["cli"], "run_prompt", flaky_run)
+        monkeypatch.setattr(deps["cli"], "_discover_latest_non_task_session_id", lambda: None)
+
+        req = ChatRequest(channel="telegram", sender_id="42", chat_id="100", text="status")
+        resp = handle_chat(req, **deps)
+
+        assert resp.text == "recovered"
+        assert calls["count"] == 2
+        assert deps["sessions"].get_copilot_session_id(session_key) is None
+
+def test_freetext_ignores_task_role_session_id(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        deps = _make_deps(tmpdir)
+        session_key = "telegram:dm:42"
+        deps["sessions"].set_copilot_session_id(session_key, "task-session-id")
+
+        resume_ids = []
+
+        def run_prompt(prompt, **kw):
+            resume_ids.append(kw.get("resume_id"))
+            return "ok"
+
+        monkeypatch.setattr(deps["cli"], "session_is_task_role", lambda sid: sid == "task-session-id")
+        monkeypatch.setattr(deps["cli"], "run_prompt", run_prompt)
+        monkeypatch.setattr(deps["cli"], "_discover_latest_non_task_session_id", lambda: "fresh-session-id")
+
+        req = ChatRequest(channel="telegram", sender_id="42", chat_id="100", text="Status")
+        resp = handle_chat(req, **deps)
+
+        assert resp.text == "ok"
+        assert resume_ids == [None]
+        assert deps["sessions"].get_copilot_session_id(session_key) == "fresh-session-id"
 
 def test_telegram_ping_back_schedules_and_delivers(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -507,8 +584,8 @@ def test_conversation_context_sent_to_cli(monkeypatch) -> None:
             return "response"
 
         monkeypatch.setattr(deps["cli"], "run_prompt", mock_run)
-        # Simulate that _discover_latest_session_id returns a session ID
-        monkeypatch.setattr(deps["cli"], "_discover_latest_session_id", lambda: "sess-abc123")
+        # Simulate that non-task session discovery returns a session ID
+        monkeypatch.setattr(deps["cli"], "_discover_latest_non_task_session_id", lambda: "sess-abc123")
 
         # First message — no stored copilot session ID yet
         req1 = ChatRequest(channel="telegram", sender_id="42", chat_id="100", text="What is Python?")

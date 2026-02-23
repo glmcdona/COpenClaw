@@ -6,6 +6,7 @@ import glob
 import logging
 from typing import Any, Optional
 import os
+from pathlib import Path
 import shutil
 import subprocess
 import sys
@@ -120,6 +121,40 @@ def _recent_log_lines(log_dir: str, limit: int = 4) -> list[str]:
     activity_log = os.path.join(log_dir, "activity.log")
     activity_lines = _tail_lines(activity_log, max_lines=200)
     return activity_lines[-limit:]
+
+
+def _find_src_dir_for_restart(workspace_dir: Optional[str]) -> Optional[str]:
+    """Find a local src/ directory containing the copenclaw package."""
+    candidates: list[str] = []
+    if workspace_dir:
+        candidates.append(workspace_dir)
+    candidates.append(os.getcwd())
+    candidates.append(str(Path(__file__).resolve().parents[3]))
+
+    seen: set[str] = set()
+    for base in candidates:
+        abs_base = os.path.abspath(base)
+        key = os.path.normcase(abs_base)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        src_dir = abs_base if os.path.basename(abs_base).lower() == "src" else os.path.join(abs_base, "src")
+        if os.path.isdir(os.path.join(src_dir, "copenclaw")):
+            return src_dir
+    return None
+
+
+def _prepend_pythonpath(path: str, env: Optional[dict[str, str]] = None) -> None:
+    """Prepend *path* to PYTHONPATH if not already present."""
+    target = env if env is not None else os.environ
+    current = target.get("PYTHONPATH", "")
+    existing = [p for p in current.split(os.pathsep) if p]
+    normalized = os.path.normcase(os.path.abspath(path))
+    for item in existing:
+        if os.path.normcase(os.path.abspath(item)) == normalized:
+            return
+    target["PYTHONPATH"] = path if not current else f"{path}{os.pathsep}{current}"
 
 def _format_age(ts: datetime | None) -> str:
     if not ts:
@@ -739,7 +774,7 @@ def create_app() -> FastAPI:
             # Discover the session ID that Copilot CLI just created and
             # store it so subsequent user messages resume this session
             # (preserving the boot context including README.md).
-            boot_sid = cli._discover_latest_session_id()
+            boot_sid = cli._discover_latest_non_task_session_id()
             if boot_sid:
                 cli._resume_session_id = boot_sid
                 cli._session_id = boot_sid
@@ -1666,11 +1701,22 @@ def create_app() -> FastAPI:
                     logger.info("Re-executing process: %s %s", sys.executable, exec_args[1:])
                     os.execv(sys.executable, exec_args)
                 else:
+                    is_python_cmd = os.path.basename(resolved).lower().startswith("python")
+                    is_copenclaw_module = len(argv) >= 3 and argv[1] == "-m" and argv[2] == "copenclaw.cli"
+                    if is_python_cmd and is_copenclaw_module:
+                        src_dir = _find_src_dir_for_restart(settings.workspace_dir)
+                        if src_dir:
+                            _prepend_pythonpath(src_dir)
+                            logger.info("Restart ensured PYTHONPATH includes: %s", src_dir)
                     exec_args = [resolved] + argv[1:]
                     logger.info("Re-executing process: %s %s", resolved, exec_args[1:])
                     os.execvp(resolved, exec_args)
 
         module_args = ["-m", "copenclaw.cli"] + (argv[1:] or ["serve"])
+        src_dir = _find_src_dir_for_restart(settings.workspace_dir)
+        if src_dir:
+            _prepend_pythonpath(src_dir)
+            logger.info("Restart ensured PYTHONPATH includes: %s", src_dir)
         logger.info("Re-executing process: %s %s", sys.executable, module_args)
         os.execv(sys.executable, [sys.executable] + module_args)
 

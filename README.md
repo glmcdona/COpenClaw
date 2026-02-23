@@ -137,7 +137,7 @@ From chat:
 
 ## GitHub Copilot CLI — The Brain
 
-COpenClaw delegates **all AI reasoning** to [GitHub Copilot CLI](https://docs.github.com/en/copilot/github-copilot-in-the-cli). Every message you send is forwarded to a `copilot` subprocess, and the response comes back through your chat app. This gives you the full power of Copilot CLI remotely:
+COpenClaw delegates **all AI reasoning** to [GitHub Copilot CLI](https://docs.github.com/en/copilot/github-copilot-in-the-cli). Session execution is **API-first** (Copilot SDK path) with explicit, logged fallback to CLI subprocess mode when needed; autopilot mode is enabled by default. This gives you the full power of Copilot CLI remotely:
 
 - **Vibe coding** — describe an application in natural language and Copilot CLI builds it: creates files, writes code, installs dependencies, runs the app, iterates on feedback
 - **Git operations** — commit, push, branch, merge, revert, rebase, view history, all via natural language
@@ -582,6 +582,9 @@ All configuration is via environment variables (or `.env` file). See [`.env.exam
 | `COPILOT_CLAW_DATA_DIR` | `.data` | Directory for jobs, sessions, tasks, audit log |
 | `COPILOT_CLAW_WORKSPACE_DIR` | `.` | Working directory for Copilot CLI |
 | `COPILOT_CLAW_CLI_TIMEOUT` | `7200` | Copilot CLI subprocess timeout (seconds) |
+| `COPILOT_CLAW_COPILOT_EXECUTION_BACKEND` | `api` | Session execution backend (`api` or `cli`) |
+| `COPILOT_CLAW_COPILOT_ALLOW_CLI_FALLBACK` | `true` | Allow explicit CLI fallback when API backend is unavailable |
+| `COPILOT_CLAW_COPILOT_AUTOPILOT_DEFAULT` | `true` | Enable Copilot autopilot mode by default for all sessions |
 | `COPILOT_CLAW_MCP_TOKEN` | *(empty)* | Bearer token to protect MCP endpoints |
 | `COPILOT_CLAW_ALLOW_ALL_COMMANDS` | `true` | Allow all shell commands (set false to use `COPILOT_CLAW_ALLOWED_COMMANDS`) |
 | `COPILOT_CLAW_ALLOWED_COMMANDS` | *(empty)* | Comma-separated allowlist (when above is false) |

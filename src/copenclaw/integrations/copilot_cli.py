@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import logging
 import os
@@ -7,9 +9,11 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Literal, Optional
 
 from copenclaw.core.logging_config import (
     append_to_file,
@@ -22,6 +26,52 @@ from copenclaw.core.mcp_registry import get_user_servers_for_merge
 logger = logging.getLogger("copenclaw.copilot_cli")
 
 DEFAULT_TIMEOUT = 7200  # seconds (2 hours)
+_DEFAULT_EXECUTION_BACKEND = "api"
+
+
+def _env_get(*names: str) -> Optional[str]:
+    for name in names:
+        value = os.getenv(name)
+        if value is not None:
+            return value
+    return None
+
+
+def _env_bool(*names: str, default: bool) -> bool:
+    value = _env_get(*names)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+@dataclass(frozen=True)
+class CopilotLaunchDefaults:
+    """Centralized defaults for all Copilot session launches."""
+
+    autopilot: bool
+    execution_backend: Literal["api", "cli"]
+    allow_cli_fallback: bool
+
+
+def load_launch_defaults() -> CopilotLaunchDefaults:
+    backend_raw = (
+        _env_get("copenclaw_COPILOT_EXECUTION_BACKEND", "COPILOT_CLAW_COPILOT_EXECUTION_BACKEND")
+        or _DEFAULT_EXECUTION_BACKEND
+    ).strip().lower()
+    backend: Literal["api", "cli"] = "cli" if backend_raw == "cli" else "api"
+    return CopilotLaunchDefaults(
+        autopilot=_env_bool(
+            "copenclaw_COPILOT_AUTOPILOT_DEFAULT",
+            "COPILOT_CLAW_COPILOT_AUTOPILOT_DEFAULT",
+            default=True,
+        ),
+        execution_backend=backend,
+        allow_cli_fallback=_env_bool(
+            "copenclaw_COPILOT_ALLOW_CLI_FALLBACK",
+            "COPILOT_CLAW_COPILOT_ALLOW_CLI_FALLBACK",
+            default=True,
+        ),
+    )
 
 
 class CopilotCliError(RuntimeError):
@@ -111,14 +161,21 @@ class CopilotCli:
         mcp_config_path: Optional[str] = None,
         resume_session_id: Optional[str] = None,
         subcommand: Optional[str] = None,
+        autopilot: Optional[bool] = None,
+        execution_backend: Optional[Literal["api", "cli"]] = None,
+        allow_cli_fallback: Optional[bool] = None,
         yolo: bool = True,
     ) -> None:
+        defaults = load_launch_defaults()
         self.executable = executable or os.getenv("COPILOT_CLI_PATH", "copilot")
         self.workspace_dir = workspace_dir or os.getenv("copenclaw_WORKSPACE_DIR")
         self.timeout = timeout
         self.mcp_server_url = mcp_server_url
         self.mcp_token = mcp_token
         self.add_dirs: list[str] = add_dirs or []
+        self.autopilot = defaults.autopilot if autopilot is None else autopilot
+        self.execution_backend: Literal["api", "cli"] = execution_backend or defaults.execution_backend
+        self.allow_cli_fallback = defaults.allow_cli_fallback if allow_cli_fallback is None else allow_cli_fallback
         self.yolo = yolo
 
         self._session_id: Optional[str] = None
@@ -175,7 +232,11 @@ class CopilotCli:
         logger.info("MCP config ready: %s", self._mcp_config_path)
         return self._mcp_config_path
 
-    def _base_cmd(self, resume_id: Optional[str] = None) -> list[str]:
+    def _base_cmd(
+        self,
+        resume_id: Optional[str] = None,
+        autopilot: Optional[bool] = None,
+    ) -> list[str]:
         """Build the base command with non-interactive flags.
 
         If *resume_id* is provided, ``--resume <id>`` is added so Copilot CLI
@@ -213,9 +274,28 @@ class CopilotCli:
         if self.yolo:
             # --yolo enables all permissions (tools, paths, URLs) at once
             flags.insert(0, "--yolo")
+        effective_autopilot = self.autopilot if autopilot is None else autopilot
+        if effective_autopilot:
+            flags.insert(0, "--autopilot")
         cmd.extend(flags)
 
         return cmd
+
+    def build_launch_command(
+        self,
+        resume_id: Optional[str] = None,
+        require_subprocess: bool = False,
+    ) -> list[str]:
+        """Build a launch command, using explicit CLI fallback when required."""
+        if require_subprocess and self.execution_backend == "api":
+            if not self.allow_cli_fallback:
+                raise CopilotCliError(
+                    "Copilot API backend selected, but subprocess launch requires explicit CLI fallback"
+                )
+            logger.warning(
+                "Copilot API backend selected; using explicit CLI fallback for subprocess launch"
+            )
+        return self._base_cmd(resume_id=resume_id)
 
     @staticmethod
     def _should_retry_with_chat(output: str) -> bool:
@@ -227,6 +307,21 @@ class CopilotCli:
             or "unexpected extra argument" in lowered
             or "no such option" in lowered
         )
+
+    @staticmethod
+    def _is_unknown_option_error(output: str) -> bool:
+        lowered = output.lower()
+        return (
+            "no such option" in lowered
+            or "unknown option" in lowered
+            or "unexpected argument" in lowered
+            or "unrecognized option" in lowered
+        )
+
+    @classmethod
+    def _should_retry_without_autopilot(cls, output: str) -> bool:
+        lowered = output.lower()
+        return "autopilot" in lowered and cls._is_unknown_option_error(lowered)
 
     def _orchestrator_log_path(self) -> str:
         return get_orchestrator_log_path()
@@ -272,10 +367,7 @@ class CopilotCli:
             logger.debug("No Copilot sessions dir found at %s", sessions_dir)
             return None
         try:
-            entries = [
-                e for e in os.scandir(sessions_dir)
-                if e.is_dir()
-            ]
+            entries = [e for e in os.scandir(sessions_dir) if e.is_dir()]
             if not entries:
                 return None
             latest = max(entries, key=lambda e: e.stat().st_mtime)
@@ -286,7 +378,274 @@ class CopilotCli:
             logger.debug("Failed to discover session ID: %s", exc)
             return None
 
+    @staticmethod
+    def _session_summary(session_dir: str) -> str:
+        """Read session summary text from workspace.yaml (best-effort)."""
+        workspace_yaml = os.path.join(session_dir, "workspace.yaml")
+        if not os.path.isfile(workspace_yaml):
+            return ""
+        try:
+            with open(workspace_yaml, "r", encoding="utf-8") as handle:
+                for raw in handle:
+                    line = raw.strip()
+                    if line.startswith("summary:"):
+                        return line.split(":", 1)[1].strip().lower()
+        except Exception:  # noqa: BLE001
+            return ""
+        return ""
+
+    def session_is_task_role(self, session_id: str) -> bool:
+        """Return True if session summary indicates worker/supervisor task role."""
+        config_dir = os.path.expanduser("~/.copilot")
+        session_dir = os.path.join(config_dir, "session-state", session_id)
+        if not os.path.isdir(session_dir):
+            session_dir = os.path.join(config_dir, "sessions", session_id)
+        summary = self._session_summary(session_dir)
+        return summary.startswith("you are worker for task") or summary.startswith("you are supervisor for task")
+
+    def _discover_latest_non_task_session_id(self) -> Optional[str]:
+        """Discover latest session, excluding worker/supervisor task sessions."""
+        config_dir = os.path.expanduser("~/.copilot")
+        sessions_dir = os.path.join(config_dir, "session-state")
+        if not os.path.isdir(sessions_dir):
+            sessions_dir = os.path.join(config_dir, "sessions")
+        if not os.path.isdir(sessions_dir):
+            return None
+        try:
+            entries = sorted(
+                [e for e in os.scandir(sessions_dir) if e.is_dir()],
+                key=lambda e: e.stat().st_mtime,
+                reverse=True,
+            )
+            for entry in entries:
+                summary = self._session_summary(entry.path)
+                if summary.startswith("you are worker for task") or summary.startswith("you are supervisor for task"):
+                    continue
+                logger.info("Discovered latest non-task Copilot CLI session: %s", entry.name)
+                return entry.name
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Failed to discover non-task session ID: %s", exc)
+        return None
+
     # ── public API ────────────────────────────────────────────
+
+    def _log_prompt_header(self, prompt: str, log_prefix: str) -> None:
+        logger.info("%s ← %s", log_prefix, prompt[:300])
+        try:
+            with open(self._orchestrator_log_path(), "a", encoding="utf-8") as f:
+                f.write(f"\n{'='*60}\n")
+                f.write(f"USER: {prompt}\n")
+                f.write(f"{'='*60}\n")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _record_boot_failure(self, error_text: str) -> None:
+        if not error_text:
+            return
+        append_to_file(
+            get_copilot_boot_failure_log_path(),
+            f"[{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}] {error_text}",
+        )
+
+    @staticmethod
+    def _await_if_needed(value: Any) -> Any:
+        if inspect.isawaitable(value):
+            return asyncio.run(value)
+        return value
+
+    @staticmethod
+    def _extract_sdk_text(response: Any) -> str:
+        if response is None:
+            return ""
+        if isinstance(response, str):
+            return response
+        for attr in ("content", "text", "message"):
+            val = getattr(response, attr, None)
+            if isinstance(val, str):
+                return val
+        data = getattr(response, "data", None)
+        if data is not None:
+            for attr in ("content", "text", "message"):
+                val = getattr(data, attr, None)
+                if isinstance(val, str):
+                    return val
+                if isinstance(data, dict) and isinstance(data.get(attr), str):
+                    return data[attr]
+        if isinstance(response, dict):
+            for key in ("content", "text", "message"):
+                val = response.get(key)
+                if isinstance(val, str):
+                    return val
+                if isinstance(val, dict):
+                    nested = val.get("content") or val.get("text")
+                    if isinstance(nested, str):
+                        return nested
+        return str(response)
+
+    def _load_sdk_client_type(self) -> type | None:
+        candidates = (
+            ("github_copilot_sdk", "CopilotClient"),
+            ("copilot_sdk", "CopilotClient"),
+        )
+        for module_name, class_name in candidates:
+            try:
+                module = __import__(module_name, fromlist=[class_name])
+            except ImportError:
+                continue
+            client_type = getattr(module, class_name, None)
+            if isinstance(client_type, type):
+                return client_type
+        return None
+
+    def _run_prompt_api(
+        self,
+        prompt: str,
+        *,
+        model: Optional[str],
+        log_prefix: str,
+    ) -> str:
+        client_type = self._load_sdk_client_type()
+        if client_type is None:
+            raise CopilotCliError("Copilot SDK backend unavailable (missing github_copilot_sdk/copilot_sdk)")
+        try:
+            client = client_type()
+            create_session = getattr(client, "create_session", None) or getattr(client, "createSession", None)
+            if not callable(create_session):
+                raise CopilotCliError("Copilot SDK backend missing create_session/createSession")
+            session = self._await_if_needed(create_session(model=model) if model else create_session())
+            send = getattr(session, "send_and_wait", None) or getattr(session, "sendAndWait", None) or getattr(session, "send", None)
+            if not callable(send):
+                raise CopilotCliError("Copilot SDK session missing send_and_wait/sendAndWait/send")
+            try:
+                response = self._await_if_needed(send(prompt=prompt))
+            except TypeError:
+                response = self._await_if_needed(send(prompt))
+            output = self._extract_sdk_text(response).strip()
+            if output:
+                self._log_line(output, prefix=log_prefix)
+            stop = getattr(client, "stop", None)
+            if callable(stop):
+                self._await_if_needed(stop())
+            self._initialized = True
+            return output
+        except CopilotCliError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise CopilotCliError(f"copilot API backend error: {exc}") from exc
+
+    def _run_prompt_cli(
+        self,
+        prompt: str,
+        *,
+        model: Optional[str],
+        cwd: Optional[str],
+        log_prefix: str,
+        resume_id: Optional[str],
+        allow_retry: bool,
+        autopilot: Optional[bool],
+        on_line: Optional[Callable[[str], Optional[bool]]],
+    ) -> str:
+        cmd = self._base_cmd(resume_id=resume_id, autopilot=autopilot)
+        cmd.extend(["-p", prompt])
+        if model:
+            cmd.extend(["--model", model])
+
+        effective_cwd = cwd or self.workspace_dir
+        try:
+            process = subprocess.Popen(
+                cmd,
+                cwd=effective_cwd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=self._make_env(),
+                encoding="utf-8",
+                errors="replace",
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+            )
+        except FileNotFoundError as exc:
+            raise CopilotCliError(f"copilot CLI not found: {exc}") from exc
+
+        output_lines: list[str] = []
+        early_stopped = False
+        timed_out = False
+        timeout_timer: Optional[threading.Timer] = None
+        if self.timeout and self.timeout > 0:
+            def _on_timeout() -> None:
+                nonlocal timed_out
+                timed_out = True
+                if process.poll() is None:
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+
+            timeout_timer = threading.Timer(self.timeout, _on_timeout)
+            timeout_timer.daemon = True
+            timeout_timer.start()
+        try:
+            assert process.stdout is not None
+            for line in process.stdout:
+                output_lines.append(line)
+                self._log_line(line, prefix=log_prefix)
+                if on_line:
+                    should_stop = on_line(line.rstrip("\n\r"))
+                    if should_stop:
+                        early_stopped = True
+                        logger.info("%s | Early stop requested; terminating Copilot CLI process", log_prefix)
+                        process.terminate()
+                        break
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        except CopilotCliError:
+            raise
+        except Exception as exc:
+            process.kill()
+            raise CopilotCliError(f"copilot CLI error: {exc}") from exc
+        finally:
+            if timeout_timer:
+                timeout_timer.cancel()
+
+        output = "".join(output_lines).strip()
+        if timed_out:
+            raise CopilotCliError(f"copilot CLI timed out after {self.timeout}s")
+        if process.returncode != 0 and not early_stopped:
+            if allow_retry and not self._subcommand and self._should_retry_with_chat(output):
+                logger.warning("copilot CLI rejected args; retrying with 'chat' subcommand")
+                self._subcommand = "chat"
+                return self._run_prompt_cli(
+                    prompt,
+                    model=model,
+                    cwd=cwd,
+                    log_prefix=log_prefix,
+                    resume_id=resume_id,
+                    allow_retry=False,
+                    autopilot=autopilot,
+                    on_line=on_line,
+                )
+            effective_autopilot = self.autopilot if autopilot is None else autopilot
+            if allow_retry and effective_autopilot and self._should_retry_without_autopilot(output):
+                logger.warning("copilot CLI rejected --autopilot; retrying without it")
+                self.autopilot = False
+                return self._run_prompt_cli(
+                    prompt,
+                    model=model,
+                    cwd=cwd,
+                    log_prefix=log_prefix,
+                    resume_id=resume_id,
+                    allow_retry=False,
+                    autopilot=False,
+                    on_line=on_line,
+                )
+            if not output:
+                raise CopilotCliError(f"copilot CLI failed with exit code {process.returncode}")
+
+        logger.info("%s → complete (%d chars)", log_prefix, len(output))
+        self._initialized = True
+        return output
 
     def create_session(self, context: str = "", allow_retry: bool = True) -> str:
         """Bootstrap a brain session (validates CLI works). Returns the response.
@@ -296,8 +655,6 @@ class CopilotCli:
         the workspace directory.
         """
         logger.info("Creating Copilot CLI brain session...")
-        cmd = self._base_cmd()
-
         if context:
             boot_prompt = (
                 "Hello! You are coming online. Here is the current workspace README.md "
@@ -308,44 +665,19 @@ class CopilotCli:
         else:
             boot_prompt = "Hello! Please confirm you are online and ready."
 
-        cmd.extend(["-p", boot_prompt])
-
         try:
-            result = subprocess.run(
-                cmd,
+            output = self.run_prompt(
+                boot_prompt,
                 cwd=self.workspace_dir,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-                env=self._make_env(),
-                encoding="utf-8",
-                errors="replace",
+                log_prefix="BOOTSTRAP",
+                allow_retry=allow_retry,
             )
-        except subprocess.TimeoutExpired as exc:
-            raise CopilotCliError(
-                f"copilot CLI timed out during session creation after {self.timeout}s"
-            ) from exc
-
-        output = result.stdout.strip()
-        stderr = result.stderr.strip()
-
-        if result.returncode != 0:
-            error_text = stderr or output
-            if error_text:
-                append_to_file(
-                    get_copilot_boot_failure_log_path(),
-                    f"[{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}] {error_text}"
-                )
-            if allow_retry and not self._subcommand and self._should_retry_with_chat(error_text):
-                logger.warning("copilot CLI rejected args; retrying with 'chat' subcommand")
-                self._subcommand = "chat"
-                return self.create_session(context=context, allow_retry=False)
-            logger.error("Session creation failed: %s", error_text)
-            raise CopilotCliError(error_text or "copilot CLI session creation failed")
-
-        self._initialized = True
-        logger.info("Brain session created. Response: %s", output[:200])
-        return output
+            logger.info("Brain session created. Response: %s", output[:200])
+            return output
+        except CopilotCliError as exc:
+            self._record_boot_failure(str(exc))
+            logger.error("Session creation failed: %s", exc)
+            raise
 
     def run_prompt(
         self,
@@ -355,6 +687,9 @@ class CopilotCli:
         log_prefix: str = "ORCHESTRATOR",
         resume_id: Optional[str] = None,
         allow_retry: bool = True,
+        execution_backend: Optional[Literal["api", "cli"]] = None,
+        autopilot: Optional[bool] = None,
+        on_line: Optional[Callable[[str], Optional[bool]]] = None,
     ) -> str:
         """Send a user prompt to Copilot CLI with streaming output.
 
@@ -366,89 +701,27 @@ class CopilotCli:
         the workspace dir.  Only the user's actual message is passed
         via ``-p``.  Output is streamed line-by-line.
         """
-        cmd = self._base_cmd(resume_id=resume_id)
-
-        # Pass ONLY the user message — system instructions are in the file
-        cmd.extend(["-p", prompt])
-
-        if model:
-            cmd.extend(["--model", model])
-
-        effective_cwd = cwd or self.workspace_dir
-
-        # Log the inbound prompt BEFORE starting the subprocess
-        logger.info("%s ← %s", log_prefix, prompt[:300])
-        try:
-            with open(self._orchestrator_log_path(), "a", encoding="utf-8") as f:
-                f.write(f"\n{'='*60}\n")
-                f.write(f"USER: {prompt}\n")
-                f.write(f"{'='*60}\n")
-        except Exception:  # noqa: BLE001
-            pass
-
-        # Use Popen for streaming output
-        try:
-            process = subprocess.Popen(
-                cmd,
-                cwd=effective_cwd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,  # merge stderr into stdout
-                text=True,
-                env=self._make_env(),
-                encoding="utf-8",
-                errors="replace",
-                # On Windows, CREATE_NEW_PROCESS_GROUP avoids "Terminate batch job" prompt
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
-            )
-        except FileNotFoundError as exc:
-            raise CopilotCliError(f"copilot CLI not found: {exc}") from exc
-
-        # Stream output line-by-line
-        output_lines: list[str] = []
-        start_time = time.monotonic()
-        try:
-            assert process.stdout is not None
-            for line in process.stdout:
-                elapsed = time.monotonic() - start_time
-                if elapsed > self.timeout:
-                    process.kill()
-                    raise CopilotCliError(
-                        f"copilot CLI timed out after {self.timeout}s"
-                    )
-                output_lines.append(line)
-                self._log_line(line, prefix=log_prefix)
-
-            process.wait(timeout=10)
-        except CopilotCliError:
-            raise
-        except Exception as exc:
-            process.kill()
-            raise CopilotCliError(f"copilot CLI error: {exc}") from exc
-
-        output = "".join(output_lines).strip()
-
-        if process.returncode != 0:
-            if allow_retry and not self._subcommand and self._should_retry_with_chat(output):
-                logger.warning("copilot CLI rejected args; retrying with 'chat' subcommand")
-                self._subcommand = "chat"
-                return self.run_prompt(
-                    prompt,
-                    model=model,
-                    cwd=cwd,
-                    log_prefix=log_prefix,
-                    resume_id=resume_id,
-                    allow_retry=False,
-                )
-            if not output:
-                raise CopilotCliError(
-                    f"copilot CLI failed with exit code {process.returncode}"
-                )
-
-        # Log completion
-        logger.info("%s → complete (%d chars)", log_prefix, len(output))
-
-        self._initialized = True
-        return output
+        self._log_prompt_header(prompt, log_prefix)
+        backend = execution_backend or self.execution_backend
+        if backend == "api":
+            try:
+                output = self._run_prompt_api(prompt, model=model, log_prefix=log_prefix)
+                logger.info("%s → complete (%d chars) [backend=api]", log_prefix, len(output))
+                return output
+            except CopilotCliError as api_exc:
+                if not self.allow_cli_fallback:
+                    raise
+                logger.warning("Copilot API backend failed; using explicit CLI fallback: %s", api_exc)
+        return self._run_prompt_cli(
+            prompt,
+            model=model,
+            cwd=cwd,
+            log_prefix=log_prefix,
+            resume_id=resume_id,
+            allow_retry=allow_retry,
+            autopilot=autopilot,
+            on_line=on_line,
+        )
 
     def version(self) -> str:
         """Return copilot CLI version string."""

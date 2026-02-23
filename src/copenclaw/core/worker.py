@@ -570,7 +570,7 @@ class WorkerThread:
                 self._log(f"Resuming previous worker session: {self.resume_session_id}")
 
             # Build the command — short trigger prompt since instructions are in the file
-            cmd = cli._base_cmd()
+            cmd = cli.build_launch_command(require_subprocess=True)
             if self.resume_session_id:
                 cmd.extend(["-p", f"You are worker for task {self.task_id}. You are RESUMING a previous session — you have full context of your earlier work. Check your inbox with task_check_inbox for new instructions, then continue working."])
             else:
@@ -958,6 +958,7 @@ class SupervisorThread:
                     trigger,
                     log_prefix=f"SUPERVISOR {self.task_id[:12]}",
                     resume_id=self._session_id,
+                    autopilot=False,
                 )
 
                 # Always re-discover session ID (may change between checks)
@@ -1065,6 +1066,12 @@ class WorkerPool:
             if task_id in self._supervisors and self._supervisors[task_id].is_running:
                 raise RuntimeError(f"Supervisor already running for task {task_id}")
 
+            effective_timeout = self.supervisor_timeout
+            if effective_timeout > 0 and check_interval > 0:
+                # Keep each supervisor check bounded so periodic monitoring
+                # can continue at the configured cadence.
+                effective_timeout = min(effective_timeout, max(5, check_interval))
+
             supervisor = SupervisorThread(
                 task_id=task_id,
                 prompt=prompt,
@@ -1073,7 +1080,7 @@ class WorkerPool:
                 mcp_token=self.mcp_token,
                 check_interval=check_interval,
                 on_output=on_output,
-                timeout=self.supervisor_timeout,
+                timeout=effective_timeout,
                 supervisor_instructions=supervisor_instructions,
                 working_dir=working_dir,
                 root_workspace_dir=self.root_workspace_dir,
