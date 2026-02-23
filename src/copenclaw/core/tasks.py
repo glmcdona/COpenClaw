@@ -106,6 +106,10 @@ _CI_DEFAULT_CONFIG: dict[str, Any] = {
     "min_iteration_interval_seconds": 60,
     "max_consecutive_failures": 5,
     "max_no_improvement_iterations": 8,
+    "auto_chain_enabled": True,
+    "auto_chain_max_generations": 20,
+    "auto_chain_failure_limit": 3,
+    "auto_chain_failure_backoff_seconds": 60,
     "quality_gate": {
         "metric": "composite_score",
         "min_delta": 0.0,
@@ -420,8 +424,17 @@ class TaskManager:
             "min_iteration_interval_seconds",
             "max_consecutive_failures",
             "max_no_improvement_iterations",
+            "auto_chain_max_generations",
+            "auto_chain_failure_limit",
+            "auto_chain_failure_backoff_seconds",
         ):
             cfg[key] = self._normalize_positive_int(source.get(key), int(cfg[key]))
+
+        auto_chain_enabled = source.get("auto_chain_enabled")
+        if isinstance(auto_chain_enabled, bool):
+            cfg["auto_chain_enabled"] = auto_chain_enabled
+        elif isinstance(auto_chain_enabled, str):
+            cfg["auto_chain_enabled"] = auto_chain_enabled.strip().lower() in {"1", "true", "yes", "on"}
 
         # Merge nested sections: only override keys present in source,
         # preserving default values for keys not provided by user.

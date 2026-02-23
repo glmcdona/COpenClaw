@@ -2107,3 +2107,150 @@ class TestContinuousImprovementProtocol:
         assert result["status"] == "sent"
         updated = handler.task_manager.get(task.task_id)
         assert updated.ci_config["max_iterations"] == 7
+
+    def test_continuous_completion_auto_chains_and_dispatches(self, tmp_path):
+        data_dir = str(tmp_path / "data")
+        os.makedirs(data_dir)
+        handler = self._make_handler(data_dir)
+        task = handler.task_manager.create_task(
+            name="Mission",
+            prompt="Improve system quality",
+            task_type="continuous_improvement",
+            ci_config={"objective": "Improve system quality"},
+            auto_supervise=False,
+        )
+        handler.task_manager.update_status(task.task_id, "completed")
+        task.ci_state["mission_generation"] = 1
+        task.ci_state["current_direction"] = "ux"
+        handler.task_manager._save()
+
+        with patch.object(handler, "_start_task", return_value={"status": "running"}) as mock_start:
+            handler._fire_on_complete_hook(
+                task,
+                "COMPLETED successfully",
+                "Improved validation and tests",
+                "Added stronger validation and fixed flaky tests.",
+            )
+
+        tasks = handler.task_manager.list_tasks()
+        assert len(tasks) == 2
+        follow_up = next(t for t in tasks if t.task_id != task.task_id)
+        assert follow_up.task_type == "continuous_improvement"
+        assert mock_start.call_count == 1
+        assert "[CONTINUOUS_MISSION_HANDOFF]" in follow_up.prompt
+        assert "What changed:" in follow_up.prompt
+        assert "What remains:" in follow_up.prompt
+        assert "Current risks:" in follow_up.prompt
+        assert follow_up.ci_state["mission_id"] == task.task_id
+
+    def test_continuous_chain_preserves_mission_context(self, tmp_path):
+        data_dir = str(tmp_path / "data")
+        os.makedirs(data_dir)
+        handler = self._make_handler(data_dir)
+        task = handler.task_manager.create_task(
+            name="Mission",
+            prompt="Improve release reliability",
+            task_type="continuous_improvement",
+            ci_config={"objective": "Improve release reliability"},
+            auto_supervise=False,
+        )
+        handler.task_manager.update_status(task.task_id, "completed")
+        task.ci_state["mission_generation"] = 2
+        task.ci_state["mission_id"] = "mission-123"
+        task.ci_state["mission_base_prompt"] = "Improve release reliability"
+        task.ci_state["mission_objective"] = "Improve release reliability"
+        handler.task_manager._save()
+
+        with patch.object(handler, "_start_task", return_value={"status": "running"}):
+            handler._fire_on_complete_hook(
+                task,
+                "COMPLETED successfully",
+                "Stabilized release checks",
+                "Reduced flaky release checks and improved retries.",
+            )
+
+        follow_up = max(handler.task_manager.list_tasks(), key=lambda t: t.created_at)
+        assert "Mission objective: Improve release reliability" in follow_up.prompt
+        assert "Prior task: Mission" in follow_up.prompt
+        assert "Chosen direction:" in follow_up.prompt
+        assert follow_up.ci_state["mission_id"] == "mission-123"
+        assert follow_up.ci_state["mission_generation"] == 3
+
+    def test_continuous_chain_direction_is_diverse_across_iterations(self, tmp_path):
+        data_dir = str(tmp_path / "data")
+        os.makedirs(data_dir)
+        handler = self._make_handler(data_dir)
+        seed = handler.task_manager.create_task(
+            name="Mission",
+            prompt="Improve platform",
+            task_type="continuous_improvement",
+            ci_config={"objective": "Improve platform"},
+            auto_supervise=False,
+        )
+        handler.task_manager.update_status(seed.task_id, "completed")
+        seed.ci_state["mission_generation"] = 1
+        seed.ci_state["current_direction"] = "performance"
+        seed.ci_state["mission_direction_history"] = ["ux", "reliability", "performance"]
+        handler.task_manager._save()
+
+        with patch.object(handler, "_start_task", return_value={"status": "running"}):
+            handler._fire_on_complete_hook(seed, "COMPLETED successfully", "Pass 1", "")
+
+        first_follow_up = max(handler.task_manager.list_tasks(), key=lambda t: t.created_at)
+        first_direction = first_follow_up.ci_state.get("current_direction")
+        assert first_direction != "performance"
+
+        handler.task_manager.update_status(first_follow_up.task_id, "completed")
+        with patch.object(handler, "_start_task", return_value={"status": "running"}):
+            handler._fire_on_complete_hook(first_follow_up, "COMPLETED successfully", "Pass 2", "")
+        all_tasks = handler.task_manager.list_tasks()
+        second_follow_up = max(
+            [t for t in all_tasks if t.task_id not in {seed.task_id, first_follow_up.task_id}],
+            key=lambda t: t.created_at,
+        )
+        second_direction = second_follow_up.ci_state.get("current_direction")
+        assert second_direction != first_direction
+
+    def test_continuous_cancelled_task_does_not_chain(self, tmp_path):
+        data_dir = str(tmp_path / "data")
+        os.makedirs(data_dir)
+        handler = self._make_handler(data_dir)
+        task = handler.task_manager.create_task(
+            name="Mission",
+            prompt="Improve safety",
+            task_type="continuous_improvement",
+            auto_supervise=False,
+        )
+        handler.task_manager.update_status(task.task_id, "cancelled")
+        with patch.object(handler, "_start_task", return_value={"status": "running"}) as mock_start:
+            handler._fire_on_complete_hook(task, "CANCELLED by user", "Cancelled", "")
+        assert len(handler.task_manager.list_tasks()) == 1
+        assert mock_start.call_count == 0
+        updated = handler.task_manager.get(task.task_id)
+        assert any(e.event == "chain_stopped" for e in updated.timeline)
+
+    def test_continuous_failure_chain_stops_at_failure_limit(self, tmp_path):
+        data_dir = str(tmp_path / "data")
+        os.makedirs(data_dir)
+        handler = self._make_handler(data_dir)
+        task = handler.task_manager.create_task(
+            name="Mission",
+            prompt="Improve reliability",
+            task_type="continuous_improvement",
+            ci_config={"auto_chain_failure_limit": 2},
+            auto_supervise=False,
+        )
+        handler.task_manager.update_status(task.task_id, "failed")
+
+        with patch.object(handler, "_start_task", return_value={"status": "running"}) as mock_start:
+            handler._fire_on_complete_hook(task, "FAILED — first", "First failure", "")
+            first_follow_up = max(handler.task_manager.list_tasks(), key=lambda t: t.created_at)
+            assert first_follow_up.task_id != task.task_id
+            assert first_follow_up.ci_state["chain_failure_streak"] == 1
+
+            handler.task_manager.update_status(first_follow_up.task_id, "failed")
+            handler._fire_on_complete_hook(first_follow_up, "FAILED — second", "Second failure", "")
+
+        assert mock_start.call_count == 1
+        assert len(handler.task_manager.list_tasks()) == 2
+        assert handler.task_manager.get(first_follow_up.task_id).status == "failed"

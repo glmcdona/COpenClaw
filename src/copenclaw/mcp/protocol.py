@@ -45,6 +45,16 @@ from copenclaw.integrations.slack import SlackAdapter
 logger = logging.getLogger("copenclaw.mcp.protocol")
 
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff"}
+_CI_DIRECTION_ORDER = ["ux", "reliability", "performance", "quality", "safety", "observability", "docs"]
+_CI_DIRECTION_GUIDANCE = {
+    "ux": "Improve user-facing flow clarity, ergonomics, and friction points.",
+    "reliability": "Increase runtime robustness, error handling, and recovery behavior.",
+    "performance": "Improve latency, throughput, and resource efficiency.",
+    "quality": "Tighten correctness, test coverage, and code health.",
+    "safety": "Reduce risky behavior and enforce guardrails for harmful actions.",
+    "observability": "Improve logs, metrics, and diagnosis signals for faster debugging.",
+    "docs": "Improve operator/developer documentation for maintainability and handoff.",
+}
 
 
 def _is_image_path(path: str) -> bool:
@@ -2006,9 +2016,267 @@ class MCPProtocolHandler:
                     )
         return {"status": "sent", "msg_id": msg.msg_id}
 
+    @staticmethod
+    def _clip_text(value: str, limit: int) -> str:
+        text = " ".join((value or "").split())
+        return text[:limit]
+
+    def _select_continuous_direction(
+        self,
+        history: list[str],
+        terminal_state: str,
+        no_improvement_iterations: int = 0,
+    ) -> tuple[str, str]:
+        normalized_history = [
+            d.strip().lower()
+            for d in history
+            if isinstance(d, str) and d.strip().lower() in _CI_DIRECTION_GUIDANCE
+        ]
+        recent = normalized_history[-3:]
+        if terminal_state == "failed":
+            priority = ["reliability", "quality", "safety", "observability", "performance", "ux", "docs"]
+        elif no_improvement_iterations > 0:
+            priority = ["performance", "quality", "observability", "reliability", "ux", "safety", "docs"]
+        else:
+            priority = list(_CI_DIRECTION_ORDER)
+
+        for direction in priority:
+            if direction not in recent:
+                rationale = (
+                    f"Selected '{direction}' to diversify from recent focuses: "
+                    f"{', '.join(recent) if recent else 'none'}."
+                )
+                return direction, rationale
+
+        last_direction = recent[-1] if recent else ""
+        if last_direction in _CI_DIRECTION_ORDER:
+            idx = _CI_DIRECTION_ORDER.index(last_direction)
+            direction = _CI_DIRECTION_ORDER[(idx + 1) % len(_CI_DIRECTION_ORDER)]
+        else:
+            direction = priority[0]
+        rationale = (
+            f"All directions were recently used; rotated to '{direction}' from "
+            f"last direction '{last_direction or 'none'}'."
+        )
+        return direction, rationale
+
+    def _maybe_chain_continuous_task(
+        self,
+        task: Any,
+        reason: str,
+        summary: str = "",
+        detail: str = "",
+    ) -> dict[str, Any] | None:
+        tm = self._require_task_manager()
+        if getattr(task, "task_type", "standard") != "continuous_improvement":
+            return None
+
+        tm._ensure_continuous_defaults(task)
+        ci_config = task.ci_config or {}
+        ci_state = task.ci_state or {}
+        mission_id = str(ci_state.get("mission_id") or task.task_id)
+        generation = int(ci_state.get("mission_generation", 1) or 1)
+        max_generations = max(1, int(ci_config.get("auto_chain_max_generations", 20) or 20))
+
+        cancel_reason = str(reason).upper().startswith("CANCELLED") or task.status == "cancelled"
+        auto_chain_enabled = bool(ci_config.get("auto_chain_enabled", True))
+        if cancel_reason:
+            task.add_timeline(
+                "chain_stopped",
+                "Continuous mission chain stopped by explicit cancellation.",
+            )
+            task.updated_at = _now()
+            tm._save()
+            return {
+                "action": "stopped",
+                "mission_id": mission_id,
+                "why": "cancelled_by_user",
+            }
+        if not auto_chain_enabled:
+            task.add_timeline(
+                "chain_stopped",
+                "Continuous mission chain disabled by configuration.",
+            )
+            task.updated_at = _now()
+            tm._save()
+            return {
+                "action": "stopped",
+                "mission_id": mission_id,
+                "why": "auto_chain_disabled",
+            }
+        if generation >= max_generations:
+            task.add_timeline(
+                "chain_stopped",
+                f"Continuous mission reached chain limit ({generation}/{max_generations}).",
+            )
+            task.updated_at = _now()
+            tm._save()
+            return {
+                "action": "stopped",
+                "mission_id": mission_id,
+                "why": "max_generations_reached",
+            }
+
+        terminal_state = "failed" if task.status == "failed" or str(reason).upper().startswith("FAILED") else "completed"
+        previous_failure_streak = int(ci_state.get("chain_failure_streak", 0) or 0)
+        failure_streak = previous_failure_streak + 1 if terminal_state == "failed" else 0
+        failure_limit = max(1, int(ci_config.get("auto_chain_failure_limit", 3) or 3))
+        if terminal_state == "failed" and failure_streak >= failure_limit:
+            task.add_timeline(
+                "chain_stopped",
+                f"Continuous mission stopped after {failure_streak} consecutive failures (limit={failure_limit}).",
+            )
+            task.updated_at = _now()
+            tm._save()
+            return {
+                "action": "stopped",
+                "mission_id": mission_id,
+                "why": "failure_limit_reached",
+            }
+
+        current_direction = str(ci_state.get("current_direction", "")).strip().lower()
+        direction_history = list(ci_state.get("mission_direction_history", []))
+        if current_direction:
+            direction_history.append(current_direction)
+        direction_history = [d for d in direction_history if isinstance(d, str) and d.strip()]
+        direction_history = [d.strip().lower() for d in direction_history][-10:]
+        no_improvement_iterations = int(ci_state.get("no_improvement_iterations", 0) or 0)
+        direction, direction_rationale = self._select_continuous_direction(
+            direction_history,
+            terminal_state=terminal_state,
+            no_improvement_iterations=no_improvement_iterations,
+        )
+
+        mission_objective = str(ci_state.get("mission_objective") or ci_config.get("objective") or "").strip()
+        if not mission_objective:
+            mission_objective = self._clip_text(task.prompt, 400)
+        mission_base_prompt = str(ci_state.get("mission_base_prompt") or task.prompt).strip()
+        summary_text = summary.strip() or "(no summary provided)"
+        detail_text = self._clip_text(detail, 1200)
+        next_target = _CI_DIRECTION_GUIDANCE.get(direction, "Advance the mission with measurable improvements.")
+        remains = (
+            f"Protect recent gains and push the next measurable improvement in {direction}."
+            if terminal_state == "completed"
+            else "Recover from the latest failure and restore stable mission progress."
+        )
+        risks = (
+            "Potential regressions or mission drift while making the next change."
+            if terminal_state == "completed"
+            else f"Recent failure risk: {self._clip_text(summary_text, 280)}"
+        )
+        next_generation = generation + 1
+        handoff_block = (
+            "[CONTINUOUS_MISSION_HANDOFF]\n"
+            f"Mission ID: {mission_id}\n"
+            f"Mission objective: {mission_objective}\n"
+            f"Prior task: {task.name} ({task.task_id})\n"
+            f"Terminal reason: {reason[:300]}\n"
+            f"What changed: {self._clip_text(summary_text, 500)}\n"
+            f"What remains: {self._clip_text(remains, 500)}\n"
+            f"Current risks: {self._clip_text(risks, 500)}\n"
+            f"Chosen direction: {direction}\n"
+            f"Direction rationale: {self._clip_text(direction_rationale, 500)}\n"
+            f"Next targets: {next_target}\n"
+            f"Recent directions: {', '.join(direction_history[-5:]) if direction_history else 'none'}\n"
+            f"Generation: {next_generation}/{max_generations}\n"
+            "Stay on this mission and avoid unrelated scope.\n"
+            "[/CONTINUOUS_MISSION_HANDOFF]"
+        )
+        if detail_text:
+            handoff_block += f"\n\nLatest detail excerpt: {detail_text}"
+        follow_up_prompt = f"{mission_base_prompt}\n\n{handoff_block}"
+
+        followup_ci_config = dict(ci_config)
+        followup_ci_config["objective"] = mission_objective
+        if terminal_state == "failed":
+            base_backoff = max(1, int(ci_config.get("auto_chain_failure_backoff_seconds", 60) or 60))
+            min_interval = int(followup_ci_config.get("min_iteration_interval_seconds", 60) or 60)
+            followup_ci_config["min_iteration_interval_seconds"] = max(min_interval, base_backoff * max(1, failure_streak))
+
+        follow_up = tm.create_task(
+            name=f"{task.name} - iteration {next_generation}",
+            prompt=follow_up_prompt,
+            task_type="continuous_improvement",
+            ci_config=followup_ci_config,
+            channel=task.channel,
+            target=task.target,
+            service_url=task.service_url,
+            check_interval=task.check_interval,
+            auto_supervise=task.auto_supervise,
+        )
+        follow_up.on_complete = task.on_complete
+        follow_up_state = follow_up.ci_state
+        follow_up_state["mission_id"] = mission_id
+        follow_up_state["mission_generation"] = next_generation
+        follow_up_state["mission_objective"] = mission_objective
+        follow_up_state["mission_base_prompt"] = mission_base_prompt
+        follow_up_state["mission_direction_history"] = (direction_history + [direction])[-10:]
+        follow_up_state["current_direction"] = direction
+        follow_up_state["chain_parent_task_id"] = task.task_id
+        follow_up_state["chain_failure_streak"] = failure_streak
+        follow_up_state["chain_last_terminal_reason"] = reason[:300]
+
+        task.ci_state["mission_id"] = mission_id
+        task.ci_state["mission_generation"] = generation
+        task.ci_state["mission_objective"] = mission_objective
+        task.ci_state["mission_base_prompt"] = mission_base_prompt
+        task.ci_state["mission_direction_history"] = direction_history
+        task.ci_state["chain_failure_streak"] = failure_streak
+
+        task.add_timeline(
+            "chain_generated",
+            f"Auto-generated follow-up {follow_up.task_id} ({direction})",
+            f"Reason={reason[:180]}; mission={self._clip_text(mission_objective, 200)}",
+        )
+        follow_up.add_timeline(
+            "chain_context",
+            f"Auto-generated from {task.task_id}",
+            f"Direction={direction}; rationale={self._clip_text(direction_rationale, 200)}",
+        )
+        tm._save()
+        self._start_task(follow_up)
+
+        if self.data_dir:
+            log_event(
+                self.data_dir,
+                "task.continuous_chain_generated",
+                {
+                    "source_task_id": task.task_id,
+                    "follow_up_task_id": follow_up.task_id,
+                    "mission_id": mission_id,
+                    "direction": direction,
+                    "terminal_state": terminal_state,
+                    "reason": reason[:300],
+                    "generation": next_generation,
+                    "max_generations": max_generations,
+                },
+            )
+        return {
+            "action": "created",
+            "task_id": follow_up.task_id,
+            "mission_id": mission_id,
+            "direction": direction,
+            "generation": next_generation,
+            "max_generations": max_generations,
+            "terminal_state": terminal_state,
+            "failure_streak": failure_streak,
+            "alignment": mission_objective[:300],
+            "rationale": direction_rationale[:300],
+        }
+
     def _fire_on_complete_hook(self, task: Any, reason: str, summary: str = "", detail: str = "") -> None:
-        """Fire the completion callback for a task that has reached a terminal state."""
-        if not task or not self.on_complete_callback:
+        """Fire completion callbacks and autonomous follow-up behavior for terminal tasks."""
+        if not task:
+            return
+
+        chain_info: dict[str, Any] | None = None
+        if getattr(task, "task_type", "standard") == "continuous_improvement":
+            try:
+                chain_info = self._maybe_chain_continuous_task(task, reason, summary, detail)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Continuous chain generation failed for task %s: %s", task.task_id, exc)
+
+        if not self.on_complete_callback:
             return
         try:
             import threading
@@ -2027,10 +2295,20 @@ class MCPProtocolHandler:
                     "If follow-up work is needed, propose it to the user with tasks_propose "
                     "(do not auto-dispatch). If no action is needed, reply with an empty message."
                 )
+            chain_note = ""
+            if chain_info:
+                chain_note = (
+                    "\n\nContinuous-chain decision:\n"
+                    f"- action: {chain_info.get('action')}\n"
+                    f"- mission_id: {chain_info.get('mission_id', '')}\n"
+                    f"- direction: {chain_info.get('direction', '')}\n"
+                    f"- rationale: {chain_info.get('rationale', '')}\n"
+                    f"- alignment: {chain_info.get('alignment', '')}\n"
+                )
             detail_block = f"\n\nCompletion detail: {detail_text[:4000]}" if detail_text else ""
             hook_prompt = (
                 f"[TASK COMPLETE] Task '{task.name}' (task_id={task.task_id}) has {reason}.\n\n"
-                f"Completion summary: {summary_text}{detail_block}\n\n"
+                f"Completion summary: {summary_text}{detail_block}{chain_note}\n\n"
                 f"Original task prompt: {task.prompt[:4000]}\n\n"
                 f"Hook instruction: {hook_instruction}\n\n"
                 f"{follow_up_guidance}"

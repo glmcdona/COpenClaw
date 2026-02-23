@@ -610,6 +610,17 @@ class TestContinuousImprovement:
         assert os.path.exists(os.path.join(task.working_dir, "ci-checkpoints.jsonl"))
         assert os.path.exists(os.path.join(task.working_dir, "ci-latest-checkpoint.json"))
 
+    def test_continuous_defaults_include_auto_chain_controls(self, tm):
+        task = tm.create_task(
+            name="CI Defaults",
+            prompt="Improve quality",
+            task_type="continuous_improvement",
+        )
+        assert task.ci_config["auto_chain_enabled"] is True
+        assert task.ci_config["auto_chain_max_generations"] >= 1
+        assert task.ci_config["auto_chain_failure_limit"] >= 1
+        assert task.ci_config["auto_chain_failure_backoff_seconds"] >= 1
+
     def test_progress_updates_iteration_and_iteration_log(self, tm):
         task = tm.create_task(
             name="CI Task",
