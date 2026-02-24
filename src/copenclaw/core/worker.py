@@ -671,9 +671,15 @@ class WorkerThread:
             # Build the command — short trigger prompt since instructions are in the file
             cmd = cli.build_launch_command(require_subprocess=True)
             if self.resume_session_id:
-                cmd.extend(["-p", f"You are worker for task {self.task_id}. You are RESUMING a previous session — you have full context of your earlier work. Check your inbox with task_check_inbox for new instructions, then continue working."])
+                CopilotCli._append_prompt_arg(
+                    cmd,
+                    f"You are worker for task {self.task_id}. You are RESUMING a previous session — you have full context of your earlier work. Check your inbox with task_check_inbox for new instructions, then continue working.",
+                )
             else:
-                cmd.extend(["-p", f"You are worker for task {self.task_id}. Read your instructions from the copilot-instructions.md file and begin working on the task immediately. Use MCP tools to report progress and the built-in file tools for filesystem work."])
+                CopilotCli._append_prompt_arg(
+                    cmd,
+                    f"You are worker for task {self.task_id}. Read your instructions from the copilot-instructions.md file and begin working on the task immediately. Use MCP tools to report progress and the built-in file tools for filesystem work.",
+                )
 
             env = os.environ.copy()
             env.setdefault("TERM", "dumb")
@@ -696,8 +702,11 @@ class WorkerThread:
             self._log(f"Prompt: {self.prompt[:200]}")
 
             logger.info(
-                "Worker %s launching Copilot CLI (cwd=%s, cmd_len=%d)",
-                self.task_id, ws, len(cmd),
+                "Worker %s launching Copilot CLI (cwd=%s, cmd_len=%d, cmd=%s)",
+                self.task_id,
+                ws,
+                len(cmd),
+                CopilotCli.summarize_command_for_log(cmd),
             )
 
             # Launch with Popen for streaming
@@ -737,6 +746,8 @@ class WorkerThread:
 
             # Stream stdout line-by-line
             assert self._process.stdout is not None
+            unknown_option_hits: list[float] = []
+            unknown_option_loop_stopped = False
             for line in self._process.stdout:
                 if self._stop_event.is_set():
                     self._log("Stop event received, breaking stream")
@@ -746,6 +757,20 @@ class WorkerThread:
                 if line:
                     self._accumulated_output.append(line)
                     self._log(line)
+                    if CopilotCli._is_unknown_option_error(line):
+                        now = time.monotonic()
+                        unknown_option_hits = [
+                            ts for ts in unknown_option_hits
+                            if now - ts <= CopilotCli.UNKNOWN_OPTION_LOOP_WINDOW_SECONDS
+                        ]
+                        unknown_option_hits.append(now)
+                        if len(unknown_option_hits) >= CopilotCli.UNKNOWN_OPTION_LOOP_MAX_HITS:
+                            unknown_option_loop_stopped = True
+                            self._log(
+                                "Detected repeated Copilot unknown-option output; terminating worker subprocess to prevent infinite loop."
+                            )
+                            self._process.terminate()
+                            break
                     if self.on_output:
                         self.on_output(self.task_id, line)
 
@@ -780,6 +805,11 @@ class WorkerThread:
             if self.on_complete:
                 if timed_out:
                     self.on_complete(self.task_id, f"ERROR: worker timed out after {self.timeout}s")
+                elif unknown_option_loop_stopped:
+                    self.on_complete(
+                        self.task_id,
+                        "ERROR: repeated Copilot unknown-option failures detected; process terminated to prevent loop",
+                    )
                 elif exit_code != 0:
                     self.on_complete(self.task_id, f"ERROR (exit {exit_code}): {final_output[-500:]}")
                 else:
