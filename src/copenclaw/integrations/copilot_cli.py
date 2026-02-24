@@ -143,12 +143,14 @@ class CopilotCli:
 
     System instructions live in .github/copilot-instructions.md in the
     workspace directory — Copilot CLI reads that file automatically.
-    Each ``run_prompt`` call passes only the user's message via ``-p``,
+    Each ``run_prompt`` call passes only the user's message via ``--prompt=``,
     keeping prompt and instructions cleanly separated.
 
     Output is streamed line-by-line to the logger and to per-task log
     files so you can watch in real-time.
     """
+    UNKNOWN_OPTION_LOOP_WINDOW_SECONDS = 120.0
+    UNKNOWN_OPTION_LOOP_MAX_HITS = 3
 
     def __init__(
         self,
@@ -280,6 +282,21 @@ class CopilotCli:
         cmd.extend(flags)
 
         return cmd
+
+    @staticmethod
+    def _append_prompt_arg(cmd: list[str], prompt: str) -> None:
+        safe_prompt = prompt.replace("\x00", " ")
+        cmd.append(f"--prompt={safe_prompt}")
+
+    @staticmethod
+    def summarize_command_for_log(cmd: list[str]) -> str:
+        parts: list[str] = []
+        for arg in cmd:
+            if arg.startswith("--prompt="):
+                parts.append(f"--prompt=<len:{len(arg) - len('--prompt=')}>")
+            else:
+                parts.append(arg)
+        return " ".join(parts)
 
     def build_launch_command(
         self,
@@ -546,9 +563,15 @@ class CopilotCli:
         on_line: Optional[Callable[[str], Optional[bool]]],
     ) -> str:
         cmd = self._base_cmd(resume_id=resume_id, autopilot=autopilot)
-        cmd.extend(["-p", prompt])
+        self._append_prompt_arg(cmd, prompt)
         if model:
             cmd.extend(["--model", model])
+        logger.info(
+            "%s | launching copilot subprocess (prompt_len=%d, cmd=%s)",
+            log_prefix,
+            len(prompt),
+            self.summarize_command_for_log(cmd),
+        )
 
         effective_cwd = cwd or self.workspace_dir
         try:
@@ -569,6 +592,8 @@ class CopilotCli:
         output_lines: list[str] = []
         early_stopped = False
         timed_out = False
+        unknown_option_hits: list[float] = []
+        unknown_option_loop_stopped = False
         timeout_timer: Optional[threading.Timer] = None
         if self.timeout and self.timeout > 0:
             def _on_timeout() -> None:
@@ -588,6 +613,24 @@ class CopilotCli:
             for line in process.stdout:
                 output_lines.append(line)
                 self._log_line(line, prefix=log_prefix)
+                if self._is_unknown_option_error(line):
+                    now = time.monotonic()
+                    unknown_option_hits = [
+                        ts for ts in unknown_option_hits
+                        if now - ts <= self.UNKNOWN_OPTION_LOOP_WINDOW_SECONDS
+                    ]
+                    unknown_option_hits.append(now)
+                    if len(unknown_option_hits) >= self.UNKNOWN_OPTION_LOOP_MAX_HITS:
+                        unknown_option_loop_stopped = True
+                        early_stopped = True
+                        logger.warning(
+                            "%s | repeated unknown-option output detected (%d hits/%ss); terminating subprocess",
+                            log_prefix,
+                            len(unknown_option_hits),
+                            int(self.UNKNOWN_OPTION_LOOP_WINDOW_SECONDS),
+                        )
+                        process.terminate()
+                        break
                 if on_line:
                     should_stop = on_line(line.rstrip("\n\r"))
                     if should_stop:
@@ -612,6 +655,8 @@ class CopilotCli:
         output = "".join(output_lines).strip()
         if timed_out:
             raise CopilotCliError(f"copilot CLI timed out after {self.timeout}s")
+        if unknown_option_loop_stopped:
+            raise CopilotCliError("copilot CLI aborted after repeated unknown-option failures")
         if process.returncode != 0 and not early_stopped:
             if allow_retry and not self._subcommand and self._should_retry_with_chat(output):
                 logger.warning("copilot CLI rejected args; retrying with 'chat' subcommand")
@@ -640,6 +685,8 @@ class CopilotCli:
                     autopilot=False,
                     on_line=on_line,
                 )
+            if self._is_unknown_option_error(output):
+                raise CopilotCliError(f"copilot CLI failed with unknown-option error: {output[-300:]}")
             if not output:
                 raise CopilotCliError(f"copilot CLI failed with exit code {process.returncode}")
 
@@ -699,7 +746,7 @@ class CopilotCli:
 
         System instructions come from .github/copilot-instructions.md in
         the workspace dir.  Only the user's actual message is passed
-        via ``-p``.  Output is streamed line-by-line.
+        via ``--prompt=...``. Output is streamed line-by-line.
         """
         self._log_prompt_header(prompt, log_prefix)
         backend = execution_backend or self.execution_backend
