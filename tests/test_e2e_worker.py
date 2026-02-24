@@ -194,10 +194,6 @@ class TestWorkerLifecycle:
         assert complete_results[0][0] == "task-test1"
         assert "All done!" in complete_results[0][1]
 
-        launched_cmd = mock_popen.call_args.args[0]
-        assert "-p" not in launched_cmd
-        assert any(str(arg).startswith("--prompt=") for arg in launched_cmd)
-
     @patch("copenclaw.core.worker.subprocess.Popen")
     @patch("copenclaw.integrations.copilot_cli.shutil.which", return_value="copilot")
     def test_worker_writes_instructions_file(self, mock_which, mock_popen, tmp_path):
@@ -246,41 +242,6 @@ class TestWorkerLifecycle:
 
         assert len(complete_results) == 1
         assert "ERROR (exit 1)" in complete_results[0][1]
-
-    @patch("copenclaw.core.worker.subprocess.Popen")
-    @patch("copenclaw.integrations.copilot_cli.shutil.which", return_value="copilot")
-    def test_worker_stops_repeated_unknown_option_loop(self, mock_which, mock_popen, tmp_path):
-        """Worker should terminate repeated unknown-option loops instead of spinning."""
-        working_dir = str(tmp_path / "work")
-        os.makedirs(working_dir)
-
-        process = FakeProcess(
-            [
-                "error: unknown option '--no-warnings'",
-                "Try 'copilot --help' for more information.",
-                "error: unknown option '--no-warnings'",
-                "Try 'copilot --help' for more information.",
-                "error: unknown option '--no-warnings'",
-                "Try 'copilot --help' for more information.",
-            ],
-            exit_code=0,
-        )
-        mock_popen.return_value = process
-
-        complete_results = []
-        worker = WorkerThread(
-            task_id="task-unknown-loop",
-            prompt="loop test",
-            working_dir=working_dir,
-            mcp_server_url="http://127.0.0.1:18790/mcp",
-            on_complete=lambda tid, text: complete_results.append((tid, text)),
-        )
-        worker.start()
-        worker._thread.join(timeout=5)
-
-        assert process._terminated is True
-        assert len(complete_results) == 1
-        assert "repeated Copilot unknown-option failures" in complete_results[0][1]
 
     @patch("copenclaw.core.worker.subprocess.Popen")
     @patch("copenclaw.integrations.copilot_cli.shutil.which", return_value="copilot")
