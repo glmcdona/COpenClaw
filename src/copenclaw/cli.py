@@ -97,7 +97,7 @@ def serve(
         return
     except Exception as exc:
         attempted = _env_true(_AUTO_REPAIR_ATTEMPTED_ENV, default=False)
-        enabled = _env_true(_AUTO_REPAIR_ON_STARTUP_ENV, default=True)
+        enabled = _env_true(_AUTO_REPAIR_ON_STARTUP_ENV, default=False)
         if not enabled or attempted:
             raise
         from copenclaw.core.config import Settings

@@ -474,11 +474,8 @@ def handle_chat(
             return False
 
     if not output.strip():
-        repair_started = _report_runtime_error("Copilot CLI returned an empty orchestrator response.")
-        if repair_started:
-            output = "⚠️ I did not receive a model response. Automatic self-repair has started; please retry in a moment."
-        else:
-            output = "⚠️ I did not receive a model response. Please retry in a moment or run /repair."
+        _report_runtime_error("Copilot CLI returned an empty orchestrator response.")
+        output = "⚠️ I did not receive a model response. Please retry in a moment or run /repair."
     elif output.lower().startswith("error:"):
         _report_runtime_error(output)
 
