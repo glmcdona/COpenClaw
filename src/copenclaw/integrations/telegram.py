@@ -181,7 +181,10 @@ class TelegramAdapter:
 
     def start_polling(self, on_update: Callable[[dict[str, Any]], None]) -> None:
         """Start a background thread that polls Telegram for messages."""
-        self.delete_webhook()
+        try:
+            self.delete_webhook()
+        except Exception as exc:
+            logger.warning("delete_webhook failed (will retry in poll loop): %s", exc)
 
         def _poll_loop() -> None:
             offset = 0
