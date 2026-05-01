@@ -896,6 +896,7 @@ def create_app() -> FastAPI:
             time.sleep(1.0)
 
     def _propose_previous_run_error_task() -> None:
+        """Notify the user about errors from the previous run (no auto-task creation)."""
         log_path = os.path.join(settings.log_dir, "copenclaw.log")
         if not os.path.isfile(log_path):
             return
@@ -929,60 +930,23 @@ def create_app() -> FastAPI:
             return
 
         excerpt = "\n".join(f"- {line[:220]}" for line in snippets)
-        prompt = (
-            "Investigate and fix errors detected in the previous COpenClaw run. "
-            "Inspect logs, identify root cause(s), apply minimal safe fixes, and run relevant tests.\n\n"
-            f"Workspace log directory: {settings.log_dir}\n"
-            "Primary log file: copenclaw.log\n\n"
-            "Recent error lines:\n"
-            f"{excerpt}\n\n"
-            "When complete, summarize what failed, what changed, and validation results."
-        )
-        task = task_manager.create_task(
-            name="Investigate previous-run errors",
-            prompt=prompt,
-            channel=channel,
-            target=target,
-            service_url="",
-            auto_supervise=True,
-            status="pending",
-        )
-        start_error = ""
-        try:
-            mcp_handler._start_task(task)
-        except Exception as exc:  # noqa: BLE001
-            start_error = str(exc)
-            logger.error("Startup recovery task failed to auto-start: %s", exc)
 
-        if start_error:
-            startup_msg = (
-                "⚠️ I found error(s) from the previous run but could not auto-start recovery.\n\n"
-                f"🧩 Task: {task.name}\n"
-                f"🆔 {task.task_id}\n"
-                f"❌ Start error: {start_error}\n\n"
-                f"Recent errors:\n{excerpt}\n\n"
-                "Run /repair to start diagnostics manually."
-            )
-        else:
-            startup_msg = (
-                "⚠️ I found error(s) from the previous run and auto-started recovery.\n\n"
-                f"🧩 Task: {task.name}\n"
-                f"🆔 {task.task_id}\n"
-                "🔄 Status: running\n\n"
-                f"Recent errors:\n{excerpt}"
-            )
+        startup_msg = (
+            "⚠️ I found error(s) from the previous run.\n\n"
+            f"Recent errors:\n{excerpt}\n\n"
+            "Run /repair to start diagnostics, or ask me to investigate."
+        )
 
         if channel == "telegram" and settings.telegram_bot_token:
             _telegram_adapter().send_message(chat_id=int(target), text=startup_msg)
         elif channel == "terminal":
             _terminal_emit_block("Startup issue detected", startup_msg, emoji="⚠️")
 
-        if not start_error:
-            try:
-                with open(marker_path, "w", encoding="utf-8") as handle:
-                    json.dump({"digest": digest, "task_id": task.task_id, "updated_at": datetime.now(timezone.utc).isoformat()}, handle)
-            except Exception:  # noqa: BLE001
-                logger.debug("Failed to write startup error proposal marker", exc_info=True)
+        try:
+            with open(marker_path, "w", encoding="utf-8") as handle:
+                json.dump({"digest": digest, "updated_at": datetime.now(timezone.utc).isoformat()}, handle)
+        except Exception:  # noqa: BLE001
+            logger.debug("Failed to write startup error proposal marker", exc_info=True)
 
     # ---- brain bootstrap ----
 
@@ -1146,10 +1110,6 @@ def create_app() -> FastAPI:
     # crashed session).  We subtract a small grace window (10s) so
     # messages sent just before boot aren't accidentally dropped.
     _boot_epoch = int(time.time()) - 10
-    _auto_repair_lock = threading.Lock()
-    _auto_repair_running = False
-    _auto_repair_last_ts = 0.0
-    _AUTO_REPAIR_COOLDOWN_SECONDS = 300
 
     # ---- task approval callback ----
 
@@ -1260,61 +1220,23 @@ def create_app() -> FastAPI:
         ).start()
 
     def _trigger_auto_repair(description: str, req: ChatRequest | None = None) -> bool:
-        from copenclaw.core.repair import run_repair
+        """Notify the user about a runtime error (no automatic repair).
 
-        nonlocal _auto_repair_running, _auto_repair_last_ts
-        now = time.time()
-        with _auto_repair_lock:
-            if _auto_repair_running:
-                logger.warning("Auto-repair request ignored: repair already running")
-                return False
-            if now - _auto_repair_last_ts < _AUTO_REPAIR_COOLDOWN_SECONDS:
-                logger.warning("Auto-repair request ignored: cooldown active")
-                return False
-            _auto_repair_running = True
-            _auto_repair_last_ts = now
-
-        workspace_root = settings.workspace_dir or os.getcwd()
-        repo_root = _resolve_repo_root()
+        Returns True if a notification was sent so the caller can adjust
+        its user-facing message accordingly.
+        """
         short_desc = " ".join(description.split())[:1500]
+        notify_msg = f"⚠️ Runtime issue detected: {short_desc[:300]}\n\nRun /repair to start diagnostics, or ask me to investigate."
 
         if req:
-            _send_repair_message(
-                req.channel,
-                req.chat_id,
-                "🛠️ Runtime issue detected. Starting automatic self-repair now.",
-                req.service_url,
-            )
+            _send_repair_message(req.channel, req.chat_id, notify_msg, req.service_url)
+            return True
         elif settings.telegram_bot_token and settings.telegram_owner_chat_id:
-            _send_repair_message(
-                "telegram",
-                settings.telegram_owner_chat_id,
-                "🛠️ Runtime issue detected. Starting automatic self-repair now.",
-            )
+            _send_repair_message("telegram", settings.telegram_owner_chat_id, notify_msg)
+            return True
 
-        def _notify(msg: str) -> None:
-            if req:
-                _send_repair_message(req.channel, req.chat_id, msg, req.service_url)
-            elif settings.telegram_bot_token and settings.telegram_owner_chat_id:
-                _send_repair_message("telegram", settings.telegram_owner_chat_id, msg)
-
-        def _runner() -> None:
-            nonlocal _auto_repair_running
-            try:
-                run_repair(
-                    description=f"Automatic runtime repair: {short_desc}",
-                    workspace_root=workspace_root,
-                    repo_root=repo_root,
-                    log_dir=settings.log_dir,
-                    timeout=settings.copilot_cli_timeout,
-                    notify=_notify,
-                )
-            finally:
-                with _auto_repair_lock:
-                    _auto_repair_running = False
-
-        threading.Thread(target=_runner, daemon=True, name="runtime-auto-repair").start()
-        return True
+        logger.warning("Runtime issue detected but no channel to notify user: %s", short_desc)
+        return False
 
     def _terminal_loop() -> None:
         if not terminal_enabled:

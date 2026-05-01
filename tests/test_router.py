@@ -235,7 +235,7 @@ def test_freetext_empty_output_triggers_runtime_error_callback(monkeypatch) -> N
             on_runtime_error=lambda description, request: events.append((description, request.sender_id)),
         )
 
-        assert "Automatic self-repair has started" in resp.text
+        assert "Please retry in a moment or run /repair" in resp.text
         assert events == [("Copilot CLI returned an empty orchestrator response.", "42")]
 
 def test_freetext_empty_output_without_runtime_error_callback_has_neutral_message(monkeypatch) -> None:
@@ -248,6 +248,7 @@ def test_freetext_empty_output_without_runtime_error_callback_has_neutral_messag
         resp = handle_chat(req, **deps)
 
         assert "Automatic self-repair has started" not in resp.text
+        assert "Please retry in a moment or run /repair" in resp.text
         assert "run /repair" in resp.text
 
 def test_freetext_error_output_triggers_runtime_error_callback(monkeypatch) -> None:
